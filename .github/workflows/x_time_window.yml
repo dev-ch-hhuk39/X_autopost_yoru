@@ -41,16 +41,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Mask secrets
+        run: |
+          echo "::add-mask::${{ secrets.GCP_SA_JSON }}"
+          echo "::add-mask::${{ secrets.X_API_KEY }}"
+          echo "::add-mask::${{ secrets.X_API_SECRET }}"
+          echo "::add-mask::${{ secrets.X_ACCESS_TOKEN }}"
+          echo "::add-mask::${{ secrets.X_ACCESS_TOKEN_SECRET }}"
+          echo "::add-mask::${{ secrets.DISCORD_WEBHOOK_URL }}"
       - name: Run poster (queue 1 item)
         run: |
           python auto_post.py
-
-# 自動停止を防ぐためのダミーコミット
+      - name: Discord通知（失敗時）
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"embeds\":[{\"title\":\"\\u274c 投稿失敗\",\"description\":\"夜職X: 投稿エラーが発生しました\",\"color\":16711680}]}"
+          fi
       - name: Keepalive Workflow
+        if: always()
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           date > last_run.txt
           git add last_run.txt
-          git commit -m "Auto-update to keep workflow alive" || exit 0
+          git commit -m "keepalive: $(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
           git push
