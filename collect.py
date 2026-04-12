@@ -171,7 +171,7 @@ def call_gemini(api_key, prompt_text):
                     return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
                 elif resp.status_code == 429:
                     wait = 70 * (attempt + 1)
-                    print(f"[WARN] 429 ({model_name}/{api_ver}) {attempt+1}/2, {wait}s待機", flush=True)
+                    print(f"[WARN] 429 ({model_name}/{api_ver}) {attempt+1}/2, {wait}s待機 | {resp.text[:500]}", flush=True)
                     time.sleep(wait)
                     last_error = f"429 rate limit: {model_name}"
                 elif resp.status_code == 404:
