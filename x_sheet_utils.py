@@ -16,6 +16,13 @@ def column_letter(index: int) -> str:
     return "".join(reversed(result))
 
 
+def sanitize_cell(value):
+    text = str(value)
+    if text.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
 def get_gspread_client():
     b64 = os.environ.get("SA_JSON_BASE64", "").strip()
     raw = os.environ.get("GCP_SA_JSON", "").strip()
@@ -95,10 +102,10 @@ def records_with_row_numbers(ws, headers: Sequence[str]) -> List[Tuple[int, Dict
 
 
 def replace_sheet(ws, headers: Sequence[str], rows: Iterable[Sequence[str]]):
-    payload = [list(headers)]
-    payload.extend([list(row) for row in rows])
+    payload = [[sanitize_cell(cell) for cell in list(headers)]]
+    payload.extend([[sanitize_cell(cell) for cell in list(row)] for row in rows])
     ws.clear()
-    ws.update(range_name="A1", values=payload)
+    ws.update(range_name="A1", values=payload, raw=True)
 
 
 def upsert_rows(
@@ -121,7 +128,7 @@ def upsert_rows(
         if not key:
             continue
 
-        ordered = [str(row.get(header, "")) for header in header_list]
+        ordered = [sanitize_cell(row.get(header, "")) for header in header_list]
         if key in index:
             row_number, _ = index[key]
             start = "A"
@@ -132,7 +139,7 @@ def upsert_rows(
             index[key] = (-1, row)
 
     if appended:
-        ws.append_rows(appended, value_input_option="USER_ENTERED")
+        ws.append_rows(appended, value_input_option="RAW")
 
 
 def write_key_value_rows(ws, rows: Iterable[Dict[str, str]]):

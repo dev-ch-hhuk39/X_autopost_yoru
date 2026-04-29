@@ -164,6 +164,44 @@ def join_pipe(items: Iterable[str]) -> str:
     return " | ".join(uniq(items))
 
 
+def compact_payload(post: Dict[str, Any]) -> str:
+    allowed_keys = [
+        "post_id",
+        "id",
+        "post_url",
+        "url",
+        "account_handle",
+        "handle",
+        "account_name",
+        "author_name",
+        "posted_at",
+        "created_at",
+        "post_type",
+        "text",
+        "full_text",
+        "hashtags",
+        "mentions",
+        "image_count",
+        "has_video",
+        "quote_count",
+        "reply_count",
+        "comment_count",
+        "repost_count",
+        "retweet_count",
+        "like_count",
+        "favorite_count",
+        "bookmark_count",
+        "impression_count",
+        "view_count",
+        "matched_keywords",
+        "matched_accounts",
+        "matched_sources",
+        "source_types",
+    ]
+    compact = {key: post.get(key) for key in allowed_keys if key in post}
+    return json.dumps(compact, ensure_ascii=False)
+
+
 def count_emojis(text: str) -> int:
     return sum(1 for ch in text if ord(ch) > 10000)
 
@@ -312,7 +350,7 @@ def normalize_post(post: Dict[str, Any], existing: Dict[str, str], config: Dict[
         "first_collected_at": existing.get("first_collected_at") or as_iso(current),
         "last_metrics_update_at": as_iso(current),
         "last_source_sync_at": as_iso(current),
-        "raw_payload_json": json.dumps(post, ensure_ascii=False),
+        "raw_payload_json": compact_payload(post),
     }
 
 
