@@ -2,9 +2,11 @@ import base64
 import json
 import os
 import tempfile
+import time
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import gspread
+from gspread.exceptions import APIError
 
 
 def column_letter(index: int) -> str:
@@ -74,7 +76,7 @@ def get_or_create_worksheet(spreadsheet, title: str, rows: int = 2000, cols: int
 def ensure_headers(ws, headers: Sequence[str]) -> List[str]:
     values = ws.get_all_values()
     if not values:
-        ws.update(range_name="1:1", values=[list(headers)])
+        retrying_update(ws, range_name="1:1", values=[list(headers)], raw=True)
         return list(headers)
 
     current = values[0]
@@ -85,7 +87,7 @@ def ensure_headers(ws, headers: Sequence[str]) -> List[str]:
             changed = True
 
     if changed:
-        ws.update(range_name="1:1", values=[current])
+        retrying_update(ws, range_name="1:1", values=[current], raw=True)
     return current
 
 
@@ -105,7 +107,44 @@ def replace_sheet(ws, headers: Sequence[str], rows: Iterable[Sequence[str]]):
     payload = [[sanitize_cell(cell) for cell in list(headers)]]
     payload.extend([[sanitize_cell(cell) for cell in list(row)] for row in rows])
     ws.clear()
-    ws.update(range_name="A1", values=payload, raw=True)
+    retrying_update(ws, range_name="A1", values=payload, raw=True)
+
+
+def retrying_update(ws, *, range_name: str, values: Sequence[Sequence[str]], raw: bool = True):
+    delays = [1, 2, 4, 8]
+    last_error = None
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            return ws.update(range_name=range_name, values=values, raw=raw)
+        except APIError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code != 429 or attempt == len(delays):
+                raise
+            last_error = exc
+            time.sleep(delay)
+    if last_error:
+        raise last_error
+
+
+def retrying_append_rows(ws, rows: Sequence[Sequence[str]], value_input_option: str = "RAW"):
+    delays = [1, 2, 4, 8]
+    last_error = None
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            return ws.append_rows(list(rows), value_input_option=value_input_option)
+        except APIError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code != 429 or attempt == len(delays):
+                raise
+            last_error = exc
+            time.sleep(delay)
+    if last_error:
+        raise last_error
+
+
+def chunked_rows(rows: Sequence[Sequence[str]], chunk_size: int = 200) -> Iterable[Sequence[Sequence[str]]]:
+    for idx in range(0, len(rows), chunk_size):
+        yield rows[idx : idx + chunk_size]
 
 
 def upsert_rows(
@@ -123,6 +162,7 @@ def upsert_rows(
             index[key] = (row_number, row)
 
     appended: List[List[str]] = []
+    pending_updates: List[Tuple[int, List[str]]] = []
     for row in rows:
         key = str(row.get(unique_header, "")).strip()
         if not key:
@@ -131,15 +171,42 @@ def upsert_rows(
         ordered = [sanitize_cell(row.get(header, "")) for header in header_list]
         if key in index:
             row_number, _ = index[key]
-            start = "A"
-            end_col = column_letter(len(header_list))
-            ws.update(range_name=f"{start}{row_number}:{end_col}{row_number}", values=[ordered])
+            pending_updates.append((row_number, ordered))
         else:
             appended.append(ordered)
             index[key] = (-1, row)
 
+    if pending_updates:
+        end_col = column_letter(len(header_list))
+        pending_updates.sort(key=lambda item: item[0])
+        range_start = pending_updates[0][0]
+        previous_row = pending_updates[0][0] - 1
+        batch_rows: List[List[str]] = []
+
+        def flush_batch(start_row: int, batch: List[List[str]]):
+            if not batch:
+                return
+            end_row = start_row + len(batch) - 1
+            retrying_update(
+                ws,
+                range_name=f"A{start_row}:{end_col}{end_row}",
+                values=batch,
+                raw=True,
+            )
+
+        current_start = range_start
+        for row_number, ordered in pending_updates:
+            if row_number != previous_row + 1 and batch_rows:
+                flush_batch(current_start, batch_rows)
+                current_start = row_number
+                batch_rows = []
+            batch_rows.append(ordered)
+            previous_row = row_number
+        flush_batch(current_start, batch_rows)
+
     if appended:
-        ws.append_rows(appended, value_input_option="RAW")
+        for chunk in chunked_rows(appended):
+            retrying_append_rows(ws, list(chunk), value_input_option="RAW")
 
 
 def write_key_value_rows(ws, rows: Iterable[Dict[str, str]]):

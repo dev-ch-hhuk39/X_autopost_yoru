@@ -600,6 +600,12 @@ def merge_posts(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def load_posts_from_source(args, config: Dict[str, Any], state: Dict[str, str]) -> (List[Dict[str, Any]], List[str], str):
     source_preference = os.environ.get("X_FETCH_SOURCE", "auto").strip().lower()
+    enable_keyword_search = (
+        os.environ.get("X_ENABLE_KEYWORD_SEARCH", str(config["collection"].get("enable_keyword_search", False)))
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
     notes: List[str] = []
 
     if args.input_json:
@@ -617,11 +623,14 @@ def load_posts_from_source(args, config: Dict[str, Any], state: Dict[str, str]) 
             account_posts = fetch_account_posts(config, token, windows["account_windows"])
         except Exception as exc:
             notes.append(f"アカウント収集で一部または全部失敗: {exc}")
-        try:
-            keyword_posts, keyword_notes = fetch_keyword_posts(config, token, windows)
-            notes.extend(keyword_notes)
-        except Exception as exc:
-            notes.append(f"キーワード収集で一部または全部失敗: {exc}")
+        if enable_keyword_search:
+            try:
+                keyword_posts, keyword_notes = fetch_keyword_posts(config, token, windows)
+                notes.extend(keyword_notes)
+            except Exception as exc:
+                notes.append(f"キーワード収集で一部または全部失敗: {exc}")
+        else:
+            notes.append("キーワード検索は現在オフです。アカウント監視のみ実行しました。")
         return merge_posts(account_posts + keyword_posts), notes, "x_api"
 
     json_posts = load_posts_from_json(None)

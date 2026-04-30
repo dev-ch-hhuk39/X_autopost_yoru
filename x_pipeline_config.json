@@ -48,6 +48,7 @@
     "bootstrap_lookback_days": 30,
     "incremental_overlap_hours": 24,
     "refresh_recent_days": 7,
+    "enable_keyword_search": false,
     "max_posts_per_account": 50,
     "max_posts_per_keyword": 100
   },
