@@ -1,8 +1,12 @@
 import argparse
+import base64
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+import requests
 
 from x_sheet_utils import ensure_headers, get_or_create_worksheet, open_spreadsheet, upsert_rows, write_key_value_rows
 
@@ -274,6 +278,341 @@ def load_posts_from_json(path: Optional[str]) -> List[Dict[str, Any]]:
     raise RuntimeError("Unsupported JSON shape. Expected a list or {'posts': [...]} .")
 
 
+def parse_state(ws) -> Dict[str, str]:
+    rows = ws.get_all_records(default_blank="")
+    state = {}
+    for row in rows:
+        key = str(row.get("key", "")).strip()
+        if key:
+            state[key] = str(row.get("value", "")).strip()
+    return state
+
+
+def bearer_token_from_env() -> str:
+    explicit = os.environ.get("X_BEARER_TOKEN", "").strip()
+    if explicit:
+        return explicit
+
+    api_key = os.environ.get("X_API_KEY", "").strip()
+    api_secret = os.environ.get("X_API_SECRET", "").strip()
+    if not api_key or not api_secret:
+        return ""
+
+    basic = base64.b64encode(f"{api_key}:{api_secret}".encode("utf-8")).decode("utf-8")
+    response = requests.post(
+        "https://api.x.com/oauth2/token",
+        headers={
+            "Authorization": f"Basic {basic}",
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        },
+        data={"grant_type": "client_credentials"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    token = str(payload.get("access_token", "")).strip()
+    if not token:
+        raise RuntimeError("Failed to obtain X bearer token from API key and secret.")
+    return token
+
+
+def x_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def api_get(url: str, token: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    response = requests.get(url, headers=x_headers(token), params=params, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
+def parse_iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def get_collection_windows(state: Dict[str, str], config: Dict[str, Any]) -> Dict[str, Any]:
+    now = now_jst()
+    collection = config["collection"]
+    last_success = parse_datetime(state.get("last_successful_collect_at", ""))
+    bootstrap = not bool(state.get("last_successful_collect_at"))
+
+    bootstrap_start = now - timedelta(days=collection.get("bootstrap_lookback_days", 30))
+    overlap_start = last_success - timedelta(hours=collection.get("incremental_overlap_hours", 24))
+    refresh_start = now - timedelta(days=collection.get("refresh_recent_days", 7))
+
+    if bootstrap:
+        account_windows = [(bootstrap_start, now)]
+        keyword_windows = [(bootstrap_start, now)]
+    else:
+        account_windows = [(overlap_start, now), (refresh_start, now)]
+        keyword_windows = [(overlap_start, now), (refresh_start, now)]
+
+    return {
+        "bootstrap": bootstrap,
+        "now": now,
+        "account_windows": dedupe_windows(account_windows),
+        "keyword_windows": dedupe_windows(keyword_windows),
+    }
+
+
+def dedupe_windows(windows: List[Any]) -> List[Any]:
+    seen = []
+    normalized = []
+    for start, end in windows:
+        key = (parse_iso_z(start), parse_iso_z(end))
+        if key not in seen:
+            seen.append(key)
+            normalized.append((start, end))
+    return normalized
+
+
+def lookup_users(handles: List[str], token: str) -> Dict[str, Dict[str, Any]]:
+    if not handles:
+        return {}
+
+    users: Dict[str, Dict[str, Any]] = {}
+    batch_size = 100
+    for index in range(0, len(handles), batch_size):
+        batch = handles[index:index + batch_size]
+        payload = api_get(
+            "https://api.x.com/2/users/by",
+            token,
+            {
+                "usernames": ",".join(batch),
+                "user.fields": "public_metrics,profile_image_url,url,verified,description",
+            },
+        )
+        for user in payload.get("data", []):
+            users[str(user.get("username", "")).lower()] = user
+    return users
+
+
+def media_maps(includes: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {item.get("media_key"): item for item in includes.get("media", []) if item.get("media_key")}
+
+
+def extract_metric(metrics: Dict[str, Any], key: str) -> int:
+    return to_int((metrics or {}).get(key))
+
+
+def build_post_record(
+    tweet: Dict[str, Any],
+    user: Dict[str, Any],
+    media_index: Dict[str, Dict[str, Any]],
+    matched_keywords: Optional[List[str]] = None,
+    matched_accounts: Optional[List[str]] = None,
+    source_types: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    attachments = tweet.get("attachments", {}) or {}
+    media_keys = attachments.get("media_keys", []) or []
+    media_items = [media_index[key] for key in media_keys if key in media_index]
+    hashtags = [tag.get("tag", "") for tag in (tweet.get("entities", {}) or {}).get("hashtags", []) if tag.get("tag")]
+    mentions = [mention.get("username", "") for mention in (tweet.get("entities", {}) or {}).get("mentions", []) if mention.get("username")]
+    urls = [url.get("expanded_url") or url.get("url") for url in (tweet.get("entities", {}) or {}).get("urls", []) if url.get("expanded_url") or url.get("url")]
+    referenced = tweet.get("referenced_tweets", []) or []
+
+    public_metrics = tweet.get("public_metrics", {}) or {}
+    follower_metrics = (user.get("public_metrics") or {}) if user else {}
+    image_count = sum(1 for item in media_items if item.get("type") == "photo")
+    has_video = any(item.get("type") in {"video", "animated_gif"} for item in media_items)
+    post_type = "post"
+    if referenced:
+        ref_type = referenced[0].get("type", "")
+        post_type = ref_type or "post"
+
+    handle = str((user or {}).get("username") or tweet.get("username") or "").strip()
+    return {
+        "post_id": str(tweet.get("id", "")).strip(),
+        "post_url": f"https://x.com/{handle}/status/{tweet.get('id')}" if handle and tweet.get("id") else "",
+        "account_name": str((user or {}).get("name") or "").strip(),
+        "account_id": str(tweet.get("author_id") or (user or {}).get("id") or "").strip(),
+        "account_handle": handle,
+        "account_url": f"https://x.com/{handle}" if handle else "",
+        "follower_count": extract_metric(follower_metrics, "followers_count"),
+        "posted_at": str(tweet.get("created_at") or "").strip(),
+        "post_type": post_type,
+        "text": str(tweet.get("text") or (tweet.get("note_tweet") or {}).get("text") or "").strip(),
+        "hashtags": hashtags,
+        "mentions": mentions,
+        "link_urls": urls,
+        "image_count": image_count,
+        "has_video": has_video,
+        "reply_count": extract_metric(public_metrics, "reply_count"),
+        "repost_count": extract_metric(public_metrics, "retweet_count") or extract_metric(public_metrics, "repost_count"),
+        "like_count": extract_metric(public_metrics, "like_count"),
+        "bookmark_count": extract_metric(public_metrics, "bookmark_count"),
+        "quote_count": extract_metric(public_metrics, "quote_count"),
+        "impression_count": extract_metric(public_metrics, "impression_count"),
+        "matched_keywords": matched_keywords or [],
+        "matched_accounts": matched_accounts or [],
+        "matched_sources": (matched_accounts or []) + (matched_keywords or []),
+        "source_types": source_types or [],
+        "image_urls": [item.get("url") or item.get("preview_image_url") for item in media_items if item.get("url") or item.get("preview_image_url")],
+    }
+
+
+def fetch_account_posts(config: Dict[str, Any], token: str, windows: List[Any]) -> List[Dict[str, Any]]:
+    handles = [item["handle"] for item in config.get("monitor_accounts", [])]
+    users = lookup_users(handles, token)
+    collection = config["collection"]
+    results: List[Dict[str, Any]] = []
+
+    for account in config.get("monitor_accounts", []):
+        handle = account["handle"]
+        user = users.get(handle.lower())
+        if not user:
+            continue
+
+        for start, end in windows:
+            next_token = None
+            fetched = 0
+            while True:
+                params = {
+                    "max_results": min(100, collection.get("max_posts_per_account", 50)),
+                    "start_time": parse_iso_z(start),
+                    "end_time": parse_iso_z(end),
+                    "tweet.fields": "created_at,public_metrics,attachments,entities,referenced_tweets,note_tweet",
+                    "user.fields": "public_metrics,username,name",
+                    "expansions": "attachments.media_keys,author_id",
+                    "media.fields": "type,url,preview_image_url",
+                }
+                if next_token:
+                    params["pagination_token"] = next_token
+                payload = api_get(f"https://api.x.com/2/users/{user['id']}/tweets", token, params)
+                includes = payload.get("includes", {}) or {}
+                media_index = media_maps(includes)
+                for tweet in payload.get("data", []):
+                    results.append(
+                        build_post_record(
+                            tweet,
+                            user,
+                            media_index,
+                            matched_accounts=[handle],
+                            source_types=["account_monitor"],
+                        )
+                    )
+                    fetched += 1
+
+                next_token = (payload.get("meta") or {}).get("next_token")
+                if not next_token or fetched >= collection.get("max_posts_per_account", 50):
+                    break
+    return results
+
+
+def fetch_keyword_posts(config: Dict[str, Any], token: str, windows: Dict[str, Any]) -> (List[Dict[str, Any]], List[str]):
+    collection = config["collection"]
+    bootstrap = windows["bootstrap"]
+    now = windows["now"]
+    notes: List[str] = []
+    results: List[Dict[str, Any]] = []
+    users_cache: Dict[str, Dict[str, Any]] = {}
+
+    for keyword in config.get("monitor_keywords", []):
+        query = f"({keyword}) -is:retweet"
+        for start, end in windows["keyword_windows"]:
+            endpoint = "recent"
+            if bootstrap:
+                endpoint = "all"
+            url = f"https://api.x.com/2/tweets/search/{endpoint}"
+            params = {
+                "query": query,
+                "max_results": min(100 if endpoint == "recent" else 100, collection.get("max_posts_per_keyword", 100)),
+                "start_time": parse_iso_z(start),
+                "end_time": parse_iso_z(end),
+                "tweet.fields": "created_at,public_metrics,attachments,entities,referenced_tweets,note_tweet",
+                "user.fields": "public_metrics,username,name",
+                "expansions": "attachments.media_keys,author_id",
+                "media.fields": "type,url,preview_image_url",
+            }
+            try:
+                payload = api_get(url, token, params)
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if endpoint == "all" and status in {400, 403, 404}:
+                    notes.append("キーワードの初回30日取得は full-archive 権限がないため直近7日に自動フォールバックしました。")
+                    start = now - timedelta(days=7)
+                    payload = api_get(
+                        "https://api.x.com/2/tweets/search/recent",
+                        token,
+                        {
+                            **params,
+                            "start_time": parse_iso_z(start),
+                            "end_time": parse_iso_z(end),
+                        },
+                    )
+                else:
+                    raise
+
+            includes = payload.get("includes", {}) or {}
+            media_index = media_maps(includes)
+            for user in includes.get("users", []):
+                users_cache[str(user.get("id"))] = user
+            for tweet in payload.get("data", []):
+                author = users_cache.get(str(tweet.get("author_id")), {})
+                results.append(
+                    build_post_record(
+                        tweet,
+                        author,
+                        media_index,
+                        matched_keywords=[keyword],
+                        source_types=["keyword_search"],
+                    )
+                )
+    return results, notes
+
+
+def merge_posts(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    for post in posts:
+        key = raw_key(post)
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = post
+            continue
+
+        current = merged[key]
+        current["matched_keywords"] = uniq(normalize_list(current.get("matched_keywords")) + normalize_list(post.get("matched_keywords")))
+        current["matched_accounts"] = uniq(normalize_list(current.get("matched_accounts")) + normalize_list(post.get("matched_accounts")))
+        current["matched_sources"] = uniq(normalize_list(current.get("matched_sources")) + normalize_list(post.get("matched_sources")))
+        current["source_types"] = uniq(normalize_list(current.get("source_types")) + normalize_list(post.get("source_types")))
+        for metric in ["reply_count", "repost_count", "like_count", "bookmark_count", "quote_count", "impression_count", "image_count"]:
+            current[metric] = max(to_int(current.get(metric)), to_int(post.get(metric)))
+        if not current.get("follower_count"):
+            current["follower_count"] = post.get("follower_count")
+        if not current.get("text"):
+            current["text"] = post.get("text")
+        current["has_video"] = bool(current.get("has_video")) or bool(post.get("has_video"))
+        current["image_urls"] = uniq(normalize_list(current.get("image_urls")) + normalize_list(post.get("image_urls")))
+    return list(merged.values())
+
+
+def load_posts_from_source(args, config: Dict[str, Any], state: Dict[str, str]) -> (List[Dict[str, Any]], List[str], str):
+    source_preference = os.environ.get("X_FETCH_SOURCE", "auto").strip().lower()
+    notes: List[str] = []
+
+    if args.input_json:
+        return load_posts_from_json(args.input_json), notes, "json_file"
+
+    can_use_api = bool(os.environ.get("X_BEARER_TOKEN", "").strip()) or (
+        bool(os.environ.get("X_API_KEY", "").strip()) and bool(os.environ.get("X_API_SECRET", "").strip())
+    )
+    if source_preference in {"api", "auto"} and can_use_api:
+        token = bearer_token_from_env()
+        windows = get_collection_windows(state, config)
+        account_posts = fetch_account_posts(config, token, windows["account_windows"])
+        keyword_posts, keyword_notes = fetch_keyword_posts(config, token, windows)
+        notes.extend(keyword_notes)
+        return merge_posts(account_posts + keyword_posts), notes, "x_api"
+
+    json_posts = load_posts_from_json(None)
+    if json_posts:
+        notes.append("X_POSTS_JSON または data/x_posts.json から投稿データを読み込みました。")
+        return json_posts, notes, "json_env"
+
+    return [], notes, "empty"
+
+
 def raw_key(post: Dict[str, Any]) -> str:
     return str(post.get("post_id") or post.get("post_url") or "").strip()
 
@@ -405,6 +744,7 @@ def run():
     args = parse_args()
     config = load_config()
     spreadsheet, raw_ws, _, _, state_ws = bootstrap_sheet(config)
+    state = parse_state(state_ws)
 
     if args.check_only:
         print(
@@ -424,14 +764,16 @@ def run():
         print("[OK] Created or validated required worksheets.")
         return
 
-    imported_posts = load_posts_from_json(args.input_json)
+    imported_posts, notes, source_name = load_posts_from_source(args, config, state)
     if not imported_posts:
         if args.allow_empty:
-            write_key_value_rows(state_ws, current_state_rows(config, 0, "empty_noop"))
+            state_rows = current_state_rows(config, 0, "empty_noop")
+            state_rows.append({"key": "last_collect_source", "value": source_name, "updated_at": as_iso(now_jst())})
+            write_key_value_rows(state_ws, state_rows)
             print("[INFO] No input posts were provided. Sheet bootstrap completed.")
             return
         raise RuntimeError(
-            "No post import source was provided. Supply --input-json, X_POSTS_JSON, or data/x_posts.json."
+            "No post import source was provided. Supply --input-json, X credentials, X_POSTS_JSON, or data/x_posts.json."
         )
 
     existing_index = {}
@@ -449,7 +791,12 @@ def run():
         normalized_rows.append(normalized)
 
     upsert_rows(raw_ws, RAW_HEADERS, "post_id", normalized_rows)
-    write_key_value_rows(state_ws, current_state_rows(config, len(normalized_rows), "imported"))
+    state_rows = current_state_rows(config, len(normalized_rows), "imported")
+    state_rows.append({"key": "last_collect_source", "value": source_name, "updated_at": as_iso(now_jst())})
+    state_rows.append({"key": "last_successful_collect_at", "value": as_iso(now_jst()), "updated_at": as_iso(now_jst())})
+    if notes:
+        state_rows.append({"key": "last_collect_notes", "value": " / ".join(notes), "updated_at": as_iso(now_jst())})
+    write_key_value_rows(state_ws, state_rows)
     print(f"[OK] Upserted {len(normalized_rows)} rows into {config['sheet_tabs']['raw_posts']}.")
 
 
