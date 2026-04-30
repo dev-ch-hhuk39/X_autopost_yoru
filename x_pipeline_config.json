@@ -39,10 +39,7 @@
       "url": "https://x.com/3j2c9q"
     }
   ],
-  "monitor_keywords": [
-    "ジャングル まみ",
-    "ジャングル きほ"
-  ],
+  "monitor_keywords": [],
   "collection": {
     "schedule_hours": 6,
     "bootstrap_lookback_days": 30,
