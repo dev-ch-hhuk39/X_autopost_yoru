@@ -1,0 +1,56 @@
+[
+  {
+    "post_id": "1111111111111111111",
+    "post_url": "https://x.com/cabalounge/status/1111111111111111111",
+    "account_name": "Cabalounge",
+    "account_id": "acct-1",
+    "account_handle": "cabalounge",
+    "follower_count": 12000,
+    "posted_at": "2026-04-29T21:15:00+09:00",
+    "post_type": "post",
+    "text": "実は夜職で売れる子ほど、営業LINEよりも来店前の期待値調整がうまい。画像つきで流れをまとめた。 #夜職",
+    "hashtags": [
+      "夜職"
+    ],
+    "mentions": [],
+    "image_count": 1,
+    "has_video": false,
+    "reply_count": 4,
+    "repost_count": 12,
+    "like_count": 185,
+    "bookmark_count": 23,
+    "impression_count": 18420,
+    "matched_keywords": [
+      "ジャングル まみ"
+    ],
+    "matched_accounts": [
+      "cabalounge"
+    ]
+  },
+  {
+    "post_id": "2222222222222222222",
+    "post_url": "https://x.com/onigiriscout_0/status/2222222222222222222",
+    "account_name": "Onigiri Scout",
+    "account_id": "acct-2",
+    "account_handle": "onigiriscout_0",
+    "follower_count": 5400,
+    "posted_at": "2026-04-30T00:40:00+09:00",
+    "post_type": "post",
+    "text": "=HYPERLINK(\"https://example.com\",\"危険に見えるけどテスト用\") 夜職あるあるを3つ。",
+    "hashtags": [],
+    "mentions": [],
+    "image_count": 0,
+    "has_video": false,
+    "reply_count": 1,
+    "repost_count": 2,
+    "like_count": 35,
+    "bookmark_count": 3,
+    "impression_count": 2800,
+    "matched_keywords": [
+      "ジャングル きほ"
+    ],
+    "matched_accounts": [
+      "onigiriscout_0"
+    ]
+  }
+]

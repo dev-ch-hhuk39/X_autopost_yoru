@@ -1,0 +1,60 @@
+name: X Collect Posts (yorusyoku)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+concurrency:
+  group: x-collect-posts-yorusyoku
+  cancel-in-progress: false
+
+jobs:
+  collect-posts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Mask secrets
+        run: |
+          echo "::add-mask::${{ secrets.GCP_SA_JSON }}"
+          echo "::add-mask::${{ secrets.DISCORD_WEBHOOK_URL }}"
+          echo "::add-mask::${{ secrets.X_POSTS_JSON }}"
+
+      - name: Bootstrap tabs and import source data
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          X_POSTS_JSON: ${{ secrets.X_POSTS_JSON }}
+        run: |
+          python x_collect_posts.py --allow-empty
+
+      - name: Analyze after collection
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+        run: |
+          python x_analyze_posts.py
+
+      - name: Discord notify on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"embeds\":[{\"title\":\"X collect/analyze failed\",\"description\":\"yorusyoku collection or analysis failed.\",\"color\":16711680}]}"
+          fi

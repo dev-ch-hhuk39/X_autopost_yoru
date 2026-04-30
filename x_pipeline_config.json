@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "platform": "x",
+  "genre": "夜職",
+  "sheet_tabs": {
+    "post_queue": "x_autopost_yoru",
+    "raw_posts": "yorusyoku_raw_posts",
+    "scored_posts": "yorusyoku_scored_posts",
+    "insights": "yorusyoku_insights",
+    "state": "yorusyoku_state"
+  },
+  "monitor_accounts": [
+    {
+      "handle": "cabalounge",
+      "url": "https://x.com/cabalounge"
+    },
+    {
+      "handle": "minatoku789",
+      "url": "https://x.com/minatoku789"
+    },
+    {
+      "handle": "amuxamudaily",
+      "url": "https://x.com/amuxamudaily"
+    },
+    {
+      "handle": "1okukure_",
+      "url": "https://x.com/1okukure_"
+    },
+    {
+      "handle": "onigiriscout_0",
+      "url": "https://x.com/onigiriscout_0"
+    },
+    {
+      "handle": "urarament",
+      "url": "https://x.com/urarament"
+    },
+    {
+      "handle": "3j2c9q",
+      "url": "https://x.com/3j2c9q"
+    }
+  ],
+  "monitor_keywords": [
+    "ジャングル まみ",
+    "ジャングル きほ"
+  ],
+  "collection": {
+    "schedule_hours": 6,
+    "bootstrap_lookback_days": 30,
+    "incremental_overlap_hours": 24,
+    "refresh_recent_days": 7,
+    "max_posts_per_account": 50,
+    "max_posts_per_keyword": 100
+  },
+  "thresholds": {
+    "buzz_like_count": 100,
+    "buzz_impression_count": 10000,
+    "relative_top_percent": 20
+  }
+}
