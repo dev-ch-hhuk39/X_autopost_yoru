@@ -322,7 +322,11 @@ def x_headers(token: str) -> Dict[str, str]:
 
 def api_get(url: str, token: str, params: Dict[str, Any]) -> Dict[str, Any]:
     response = requests.get(url, headers=x_headers(token), params=params, timeout=60)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        body = response.text[:800] if response is not None else ""
+        raise RuntimeError(f"X API request failed: {url} status={response.status_code} body={body}") from exc
     return response.json()
 
 
@@ -461,6 +465,7 @@ def fetch_account_posts(config: Dict[str, Any], token: str, windows: List[Any]) 
         handle = account["handle"]
         user = users.get(handle.lower())
         if not user:
+            print(f"[WARN] User lookup missing for @{handle}")
             continue
 
         for start, end in windows:
@@ -526,8 +531,14 @@ def fetch_keyword_posts(config: Dict[str, Any], token: str, windows: Dict[str, A
             }
             try:
                 payload = api_get(url, token, params)
-            except requests.HTTPError as exc:
-                status = exc.response.status_code if exc.response is not None else None
+            except RuntimeError as exc:
+                status = None
+                message = str(exc)
+                if "status=" in message:
+                    try:
+                        status = int(message.split("status=")[1].split()[0].split("body=")[0])
+                    except Exception:
+                        status = None
                 if endpoint == "all" and status in {400, 403, 404}:
                     notes.append("キーワードの初回30日取得は full-archive 権限がないため直近7日に自動フォールバックしました。")
                     start = now - timedelta(days=7)
@@ -600,9 +611,17 @@ def load_posts_from_source(args, config: Dict[str, Any], state: Dict[str, str]) 
     if source_preference in {"api", "auto"} and can_use_api:
         token = bearer_token_from_env()
         windows = get_collection_windows(state, config)
-        account_posts = fetch_account_posts(config, token, windows["account_windows"])
-        keyword_posts, keyword_notes = fetch_keyword_posts(config, token, windows)
-        notes.extend(keyword_notes)
+        account_posts = []
+        keyword_posts = []
+        try:
+            account_posts = fetch_account_posts(config, token, windows["account_windows"])
+        except Exception as exc:
+            notes.append(f"アカウント収集で一部または全部失敗: {exc}")
+        try:
+            keyword_posts, keyword_notes = fetch_keyword_posts(config, token, windows)
+            notes.extend(keyword_notes)
+        except Exception as exc:
+            notes.append(f"キーワード収集で一部または全部失敗: {exc}")
         return merge_posts(account_posts + keyword_posts), notes, "x_api"
 
     json_posts = load_posts_from_json(None)
