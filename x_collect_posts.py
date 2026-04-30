@@ -216,12 +216,30 @@ def extract_mentions(text: str) -> List[str]:
 
 def time_slot_for_hour(hour: int) -> str:
     if 0 <= hour <= 5:
-        return "late_night"
+        return "深夜"
     if 6 <= hour <= 11:
-        return "morning"
+        return "朝"
     if 12 <= hour <= 17:
-        return "afternoon"
-    return "evening"
+        return "昼"
+    return "夜"
+
+
+def weekday_ja(dt: datetime) -> str:
+    names = ["月", "火", "水", "木", "金", "土", "日"]
+    return names[dt.weekday()]
+
+
+def normalize_post_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    mapping = {
+        "post": "通常投稿",
+        "tweet": "通常投稿",
+        "reply": "返信",
+        "quote": "引用",
+        "retweet": "リポスト",
+        "repost": "リポスト",
+    }
+    return mapping.get(text, "通常投稿")
 
 
 def first_line(text: str, limit: int = 30) -> str:
@@ -317,10 +335,10 @@ def normalize_post(post: Dict[str, Any], existing: Dict[str, str], config: Dict[
         "follower_count": str(to_int(post.get("follower_count"))),
         "posted_at": as_iso(posted_at),
         "posted_date": posted_at.strftime("%Y-%m-%d"),
-        "weekday": posted_at.strftime("%a"),
+        "weekday": weekday_ja(posted_at),
         "hour": str(posted_at.hour),
         "time_slot": time_slot_for_hour(posted_at.hour),
-        "post_type": str(post.get("post_type") or post.get("tweet_type") or "post").strip(),
+        "post_type": normalize_post_type(post.get("post_type") or post.get("tweet_type") or "post"),
         "text": text,
         "hook_text": first_line(text),
         "text_length": str(len(text)),
@@ -363,8 +381,8 @@ def bootstrap_sheet(config: Dict[str, Any]):
     state_ws = get_or_create_worksheet(spreadsheet, tabs["state"], rows=100, cols=3)
 
     ensure_headers(raw_ws, RAW_HEADERS)
-    ensure_headers(scored_ws, ["post_id"])
-    ensure_headers(insights_ws, ["section", "metric", "value", "note", "updated_at"])
+    ensure_headers(scored_ws, ["投稿ID"])
+    ensure_headers(insights_ws, ["分類", "指標", "値", "示唆", "更新日時"])
     ensure_headers(state_ws, ["key", "value", "updated_at"])
     return spreadsheet, raw_ws, scored_ws, insights_ws, state_ws
 
