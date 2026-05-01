@@ -39,6 +39,31 @@ def drive_session():
     return AuthorizedSession(creds)
 
 
+def validate_drive_folder_access(folder_id: str):
+    if not folder_id:
+        raise RuntimeError("Drive folder id is empty.")
+    session = drive_session()
+    url = f"{DRIVE_FILE_URL}/{folder_id}"
+    params = {
+        "supportsAllDrives": "true",
+        "fields": "id,name,mimeType,capabilities(canAddChildren,canEdit),driveId,owners,emailAddress",
+    }
+    response = session.get(url, params=params, timeout=60)
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RuntimeError(
+            f"Drive folder check failed: status={response.status_code} folder_id={folder_id} body={response.text[:1000]}"
+        ) from exc
+    payload = response.json()
+    caps = payload.get("capabilities", {})
+    if not caps.get("canAddChildren", False):
+        raise RuntimeError(
+            f"Drive folder is visible but not writable: folder_id={folder_id} name={payload.get('name')} capabilities={caps}"
+        )
+    return payload
+
+
 def env_required(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -71,7 +96,12 @@ def upload_to_drive(data: bytes, mime_type: str, filename: str, folder_id: str) 
         f"Content-Type: {mime_type}\r\n\r\n"
     ).encode("utf-8") + data + f"\r\n--{boundary}--".encode("utf-8")
     response = session.post(DRIVE_UPLOAD_URL, headers={"Content-Type": f"multipart/related; boundary={boundary}"}, data=body, timeout=120)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RuntimeError(
+            f"Drive upload failed: status={response.status_code} folder_id={folder_id} filename={filename} body={response.text[:1000]}"
+        ) from exc
     file_id = response.json()["id"]
     view_url = f"https://drive.google.com/file/d/{file_id}/view"
     return file_id, view_url
@@ -123,6 +153,17 @@ def run():
 
     drive_image_folder = os.environ.get("DRIVE_IMAGE_FOLDER_ID", "").strip()
     drive_video_folder = os.environ.get("DRIVE_VIDEO_FOLDER_ID", "").strip() or drive_image_folder
+    image_folder_meta = validate_drive_folder_access(drive_image_folder)
+    print(
+        f"[OK] Drive image folder access: id={image_folder_meta.get('id')} name={image_folder_meta.get('name')}",
+        flush=True,
+    )
+    if drive_video_folder:
+        video_folder_meta = validate_drive_folder_access(drive_video_folder)
+        print(
+            f"[OK] Drive video folder access: id={video_folder_meta.get('id')} name={video_folder_meta.get('name')}",
+            flush=True,
+        )
 
     changed = False
     for row in rows:

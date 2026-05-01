@@ -141,12 +141,25 @@ def build_prompt(template, genre, count):
 
 def call_gemini(api_key, prompt_text):
     """Gemini REST API を直接呼び出す。v1/v1beta・複数モデルを自動フォールバック"""
-    # (モデル名, APIバージョン) の順番で試す
-    candidates = [
-        ("gemini-2.0-flash-lite",   "v1beta"),
-        ("gemini-2.0-flash",        "v1beta"),
-        ("gemini-2.0-flash-exp",    "v1beta"),
-    ]
+    override = os.environ.get("GEMINI_MODEL_CANDIDATES", "").strip()
+    if override:
+        candidates = []
+        for item in override.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "@" in item:
+                model_name, api_ver = item.split("@", 1)
+            else:
+                model_name, api_ver = item, "v1beta"
+            candidates.append((model_name.strip(), api_ver.strip()))
+    else:
+        # 2026-05 時点の現行寄り候補。古い 2.0-exp は外す。
+        candidates = [
+            ("gemini-2.5-flash-lite", "v1beta"),
+            ("gemini-2.5-flash", "v1beta"),
+            ("gemini-2.5-pro", "v1beta"),
+        ]
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
