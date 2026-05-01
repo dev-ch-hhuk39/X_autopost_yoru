@@ -5,6 +5,7 @@ import sys
 
 import gspread
 import requests
+from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
 from requests_oauthlib import OAuth1
 
@@ -84,19 +85,37 @@ def get_sheet():
         return sh.sheet1
 
 
+def drive_session():
+    info = json.loads(GCP_SA_JSON)
+    creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
+    return AuthorizedSession(creds)
+
+
 def header_index_map(ws):
     headers = ws.row_values(1)
     return {header: idx + 1 for idx, header in enumerate(headers)}
 
 
-def upload_media(image_url: str):
-    if not image_url:
-        return None
-    log(f"[IMAGE] Downloading: {image_url}")
-    response = requests.get(image_url, timeout=60)
+def download_drive_file(file_id: str):
+    session = drive_session()
+    response = session.get(f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true", timeout=120)
     response.raise_for_status()
+    return response.content
 
-    req = requests.post(MEDIA_UPLOAD_URL, auth=get_oauth(), files={"media": response.content}, timeout=60)
+
+def upload_media(image_url: str, drive_file_id: str = ""):
+    if not image_url and not drive_file_id:
+        return None
+    if drive_file_id:
+        log(f"[IMAGE] Downloading from Drive file id: {drive_file_id}")
+        media_bytes = download_drive_file(drive_file_id)
+    else:
+        log(f"[IMAGE] Downloading: {image_url}")
+        response = requests.get(image_url, timeout=60)
+        response.raise_for_status()
+        media_bytes = response.content
+
+    req = requests.post(MEDIA_UPLOAD_URL, auth=get_oauth(), files={"media": media_bytes}, timeout=60)
     if req.status_code >= 400:
         raise RuntimeError(f"Media upload failed: {req.status_code} {req.text}")
     media_id = req.json().get("media_id_string")
@@ -151,10 +170,11 @@ def run():
     try:
         image_url = str(row.get("画像URL", "")).strip()
         video_url = str(row.get("動画URL", "")).strip()
+        drive_image_file_id = str(row.get("ドライブ画像ファイルID", "")).strip()
         if video_url and not image_url:
             raise RuntimeError("動画の自動投稿はまだ未対応です。画像付きまたはテキスト投稿で運用してください。")
 
-        media_id = upload_media(image_url) if image_url else None
+        media_id = upload_media(image_url, drive_image_file_id) if (image_url or drive_image_file_id) else None
         tweet_id = post_tweet(str(row.get("投稿文", "")).strip(), media_id)
         log(f"[SUCCESS] Tweet ID: {tweet_id}")
         update_cells(
