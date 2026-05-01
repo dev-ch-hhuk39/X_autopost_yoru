@@ -46,7 +46,7 @@ def validate_drive_folder_access(folder_id: str):
     url = f"{DRIVE_FILE_URL}/{folder_id}"
     params = {
         "supportsAllDrives": "true",
-        "fields": "id,name,mimeType,capabilities(canAddChildren,canEdit),driveId,owners,emailAddress",
+        "fields": "id,name,mimeType,capabilities(canAddChildren,canEdit),driveId,owners(emailAddress)",
     }
     response = session.get(url, params=params, timeout=60)
     try:
