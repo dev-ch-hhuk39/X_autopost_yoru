@@ -2,6 +2,7 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 
 import gspread
 import requests
@@ -36,6 +37,7 @@ QUEUE_HEADERS = [
 
 TWEET_URL = "https://api.twitter.com/2/tweets"
 MEDIA_UPLOAD_URL = "https://upload.twitter.com/1.1/media/upload.json"
+VIDEO_CHUNK_SIZE = 5 * 1024 * 1024
 
 
 def log(*args):
@@ -91,21 +93,91 @@ def header_index_map(ws):
     headers = ws.row_values(1)
     return {header: idx + 1 for idx, header in enumerate(headers)}
 
-def upload_media(image_url: str):
-    if not image_url:
-        return None
-    log(f"[IMAGE] Downloading: {image_url}")
-    response = requests.get(image_url, timeout=60)
-    response.raise_for_status()
-    media_bytes = response.content
-
+def upload_image_bytes(media_bytes: bytes):
     req = requests.post(MEDIA_UPLOAD_URL, auth=get_oauth(), files={"media": media_bytes}, timeout=60)
     if req.status_code >= 400:
-        raise RuntimeError(f"Media upload failed: {req.status_code} {req.text}")
+        raise RuntimeError(f"Image upload failed: {req.status_code} {req.text}")
     media_id = req.json().get("media_id_string")
     if not media_id:
-        raise RuntimeError("Media upload succeeded but media_id_string was missing.")
+        raise RuntimeError("Image upload succeeded but media_id_string was missing.")
     return media_id
+
+
+def wait_for_video_processing(media_id: str):
+    while True:
+        status_resp = requests.get(
+            MEDIA_UPLOAD_URL,
+            auth=get_oauth(),
+            params={"command": "STATUS", "media_id": media_id},
+            timeout=60,
+        )
+        if status_resp.status_code >= 400:
+            raise RuntimeError(f"Video STATUS failed: {status_resp.status_code} {status_resp.text}")
+        payload = status_resp.json()
+        processing = payload.get("processing_info") or {}
+        state = processing.get("state")
+        if state in {"succeeded", None}:
+            return
+        if state == "failed":
+            raise RuntimeError(f"Video processing failed: {json.dumps(processing, ensure_ascii=False)}")
+        time.sleep(int(processing.get("check_after_secs", 2)))
+
+
+def upload_video_bytes(media_bytes: bytes, media_type: str):
+    init_resp = requests.post(
+        MEDIA_UPLOAD_URL,
+        auth=get_oauth(),
+        data={
+            "command": "INIT",
+            "total_bytes": len(media_bytes),
+            "media_type": media_type,
+            "media_category": "tweet_video",
+        },
+        timeout=60,
+    )
+    if init_resp.status_code >= 400:
+        raise RuntimeError(f"Video INIT failed: {init_resp.status_code} {init_resp.text}")
+    media_id = init_resp.json().get("media_id_string")
+    if not media_id:
+        raise RuntimeError("Video INIT succeeded but media_id_string was missing.")
+
+    for segment_index, start in enumerate(range(0, len(media_bytes), VIDEO_CHUNK_SIZE)):
+        chunk = media_bytes[start:start + VIDEO_CHUNK_SIZE]
+        append_resp = requests.post(
+            MEDIA_UPLOAD_URL,
+            auth=get_oauth(),
+            data={"command": "APPEND", "media_id": media_id, "segment_index": segment_index},
+            files={"media": chunk},
+            timeout=120,
+        )
+        if append_resp.status_code >= 400:
+            raise RuntimeError(f"Video APPEND failed: {append_resp.status_code} {append_resp.text}")
+
+    finalize_resp = requests.post(
+        MEDIA_UPLOAD_URL,
+        auth=get_oauth(),
+        data={"command": "FINALIZE", "media_id": media_id},
+        timeout=60,
+    )
+    if finalize_resp.status_code >= 400:
+        raise RuntimeError(f"Video FINALIZE failed: {finalize_resp.status_code} {finalize_resp.text}")
+    wait_for_video_processing(media_id)
+    return media_id
+
+
+def upload_media(image_url: str = "", video_url: str = ""):
+    if not image_url and not video_url:
+        return None
+    target_url = video_url or image_url
+    media_kind = "VIDEO" if video_url else "IMAGE"
+    log(f"[{media_kind}] Downloading: {target_url}")
+    response = requests.get(target_url, timeout=120)
+    response.raise_for_status()
+    media_bytes = response.content
+    media_type = response.headers.get("Content-Type", "").split(";")[0].strip() or ("video/mp4" if video_url else "image/jpeg")
+    if video_url:
+        return upload_video_bytes(media_bytes, media_type)
+    return upload_image_bytes(media_bytes)
 
 
 def post_tweet(text: str, media_id=None):
@@ -154,10 +226,7 @@ def run():
     try:
         image_url = str(row.get("画像URL", "")).strip()
         video_url = str(row.get("動画URL", "")).strip()
-        if video_url and not image_url:
-            raise RuntimeError("動画の自動投稿はまだ未対応です。画像付きまたはテキスト投稿で運用してください。")
-
-        media_id = upload_media(image_url) if image_url else None
+        media_id = upload_media(image_url=image_url, video_url=video_url) if (image_url or video_url) else None
         tweet_id = post_tweet(str(row.get("投稿文", "")).strip(), media_id)
         log(f"[SUCCESS] Tweet ID: {tweet_id}")
         update_cells(

@@ -61,6 +61,14 @@ def build_queue_rows(review_rows: List[Dict[str, str]], existing_rows: List[Dict
         if not approved and not existing:
             continue
 
+        media_type = str(review.get("メディア種別", "")).strip()
+        primary_media_url = str(review.get("保存メディアURL", "")).strip()
+        threads_image_url = str(review.get("Threads公開画像URL", "")).strip()
+        threads_video_url = str(review.get("Threads公開動画URL", "")).strip()
+
+        queue_image_url = primary_media_url if media_type != "動画" else ""
+        queue_video_url = threads_video_url if media_type == "動画" else first_media_url(review.get("動画URL一覧", ""))
+
         queue_id = existing.get("キューID", "") or f"x-{source_id}"
         x_state = existing.get("X投稿状態", "")
         if not x_state:
@@ -79,12 +87,12 @@ def build_queue_rows(review_rows: List[Dict[str, str]], existing_rows: List[Dict
             "元投稿URL": review.get("元投稿URL", ""),
             "アカウント名": review.get("アカウント名", ""),
             "投稿文": selected_text or existing.get("投稿文", ""),
-            "画像URL": review.get("保存メディアURL", "") or first_media_url(review.get("画像URL一覧", "")),
-            "動画URL": review.get("Threads公開動画URL", "") or first_media_url(review.get("動画URL一覧", "")),
+            "画像URL": queue_image_url or existing.get("画像URL", ""),
+            "動画URL": queue_video_url or existing.get("動画URL", ""),
             "ドライブ画像ファイルID": "",
             "ドライブ動画ファイルID": "",
-            "Threads画像URL": review.get("Threads公開画像URL", "") or review.get("保存メディアURL", "") or existing.get("Threads画像URL", ""),
-            "Threads動画URL": review.get("Threads公開動画URL", existing.get("Threads動画URL", "")),
+            "Threads画像URL": threads_image_url or (primary_media_url if media_type != "動画" else "") or existing.get("Threads画像URL", ""),
+            "Threads動画URL": threads_video_url or existing.get("Threads動画URL", ""),
             "採用案": review.get("採用案", existing.get("採用案", "")),
             "転載可否": review.get("転載可否", existing.get("転載可否", "")),
             "確認メモ": review.get("確認メモ", existing.get("確認メモ", "")),

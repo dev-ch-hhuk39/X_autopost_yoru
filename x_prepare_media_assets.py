@@ -2,11 +2,13 @@ import hashlib
 import json
 import mimetypes
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import requests
+from yt_dlp import YoutubeDL
 
 from x_sheet_schema import REVIEW_DROPDOWNS, REVIEW_HEADERS
 from x_sheet_utils import apply_dropdown_validation, ensure_exact_headers, get_or_create_worksheet, open_spreadsheet, sanitize_cell
@@ -45,6 +47,36 @@ def download_media(url: str) -> Tuple[bytes, str]:
     return response.content, mime
 
 
+def download_video_from_post_url(post_url: str) -> Tuple[bytes, str]:
+    if not post_url:
+        raise RuntimeError("post_url is required to fetch video with yt-dlp.")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "format": "best[ext=mp4]/best",
+            "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+        }
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(post_url, download=True)
+            requested = info.get("requested_downloads") or []
+            filepath = ""
+            if requested and requested[0].get("filepath"):
+                filepath = requested[0]["filepath"]
+            if not filepath:
+                filepath = ydl.prepare_filename(info)
+            path = Path(filepath)
+            if not path.exists():
+                files = sorted(Path(tmpdir).glob("*"))
+                if not files:
+                    raise RuntimeError("yt-dlp did not produce a downloadable video file.")
+                path = files[0]
+            mime = mimetypes.guess_type(str(path))[0] or "video/mp4"
+            return path.read_bytes(), mime
+
+
 def upload_to_cloudinary(data: bytes, mime_type: str, public_id: str) -> str:
     cloud_name = env_required("CLOUDINARY_CLOUD_NAME")
     api_key = env_required("CLOUDINARY_API_KEY")
@@ -64,6 +96,11 @@ def upload_to_cloudinary(data: bytes, mime_type: str, public_id: str) -> str:
 def first_pipe_value(value: str) -> str:
     parts = [part.strip() for part in str(value or "").split("|") if part.strip()]
     return parts[0] if parts else ""
+
+
+def looks_like_image_url(url: str) -> bool:
+    text = str(url or "").lower().strip()
+    return text.endswith((".jpg", ".jpeg", ".png", ".webp")) or "/image/upload/" in text
 
 
 def safe_slug(text: str, fallback: str) -> str:
@@ -107,12 +144,22 @@ def run():
             row["Threads公開画像URL"] = public_url
             changed = True
 
-        if video_url and not row.get("Threads公開動画URL"):
+        existing_video_public_url = str(row.get("Threads公開動画URL", "")).strip()
+        needs_video_refresh = bool(video_url) and (
+            not existing_video_public_url
+            or looks_like_image_url(existing_video_public_url)
+        )
+        if needs_video_refresh:
             try:
-                data, mime = download_media(video_url)
+                if video_url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    data, mime = download_video_from_post_url(str(row.get("元投稿URL", "")).strip())
+                else:
+                    data, mime = download_media(video_url)
+                    if not mime.startswith("video/"):
+                        data, mime = download_video_from_post_url(str(row.get("元投稿URL", "")).strip())
                 public_url = upload_to_cloudinary(data, mime, build_public_id(post_id, str(row.get('アカウント名', '')), "video"))
                 row["ドライブ動画ファイルID"] = ""
-                if not row.get("保存メディアURL"):
+                if not row.get("保存メディアURL") or looks_like_image_url(str(row.get("保存メディアURL", "")).strip()):
                     row["保存メディアURL"] = public_url
                     row["保存メディアパス"] = build_public_id(post_id, str(row.get('アカウント名', '')), "video")
                 row["Threads公開動画URL"] = public_url
