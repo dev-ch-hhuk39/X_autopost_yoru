@@ -364,6 +364,51 @@ def media_maps(includes: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {item.get("media_key"): item for item in includes.get("media", []) if item.get("media_key")}
 
 
+def enrich_media_map_with_variants(media_index: Dict[str, Dict[str, Any]], token: str) -> Dict[str, Dict[str, Any]]:
+    media_keys = [
+        key for key, item in media_index.items()
+        if item.get("type") in {"video", "animated_gif"}
+    ]
+    if not media_keys:
+        return media_index
+
+    batch_size = 100
+    for index in range(0, len(media_keys), batch_size):
+        batch = media_keys[index:index + batch_size]
+        payload = api_get(
+            "https://api.x.com/2/media",
+            token,
+            {
+                "media_keys": ",".join(batch),
+                "media.fields": "type,url,preview_image_url,variants,duration_ms,width,height",
+            },
+        )
+        for item in payload.get("data", []):
+            media_key = item.get("media_key")
+            if media_key and media_key in media_index:
+                merged = dict(media_index[media_key])
+                merged.update(item)
+                media_index[media_key] = merged
+    return media_index
+
+
+def best_video_url(media_item: Dict[str, Any]) -> str:
+    variants = media_item.get("variants") or []
+    mp4_variants = [
+        variant for variant in variants
+        if str(variant.get("content_type", "")).startswith("video/mp4") and variant.get("url")
+    ]
+    if mp4_variants:
+        ranked = sorted(mp4_variants, key=lambda item: to_int(item.get("bit_rate")), reverse=True)
+        return str(ranked[0].get("url") or "").strip()
+
+    for variant in variants:
+        if variant.get("url"):
+            return str(variant.get("url") or "").strip()
+
+    return str(media_item.get("url") or "").strip()
+
+
 def extract_metric(metrics: Dict[str, Any], key: str) -> int:
     return to_int((metrics or {}).get(key))
 
@@ -416,9 +461,9 @@ def build_post_record(
             if item.get("type") == "photo" and (item.get("url") or item.get("preview_image_url"))
         ],
         "video_urls": [
-            item.get("preview_image_url") or item.get("url")
+            best_video_url(item)
             for item in media_items
-            if item.get("type") in {"video", "animated_gif"} and (item.get("preview_image_url") or item.get("url"))
+            if item.get("type") in {"video", "animated_gif"} and best_video_url(item)
         ],
         "reply_count": extract_metric(public_metrics, "reply_count"),
         "repost_count": extract_metric(public_metrics, "retweet_count") or extract_metric(public_metrics, "repost_count"),
@@ -430,7 +475,6 @@ def build_post_record(
         "matched_accounts": matched_accounts or [],
         "matched_sources": (matched_accounts or []) + (matched_keywords or []),
         "source_types": source_types or [],
-        "image_urls": [item.get("url") or item.get("preview_image_url") for item in media_items if item.get("url") or item.get("preview_image_url")],
     }
 
 
@@ -465,6 +509,7 @@ def fetch_account_posts(config: Dict[str, Any], token: str, windows: List[Any]) 
                 payload = api_get(f"https://api.x.com/2/users/{user['id']}/tweets", token, params)
                 includes = payload.get("includes", {}) or {}
                 media_index = media_maps(includes)
+                media_index = enrich_media_map_with_variants(media_index, token)
                 for tweet in payload.get("data", []):
                     results.append(
                         build_post_record(
@@ -535,6 +580,7 @@ def fetch_keyword_posts(config: Dict[str, Any], token: str, windows: Dict[str, A
 
             includes = payload.get("includes", {}) or {}
             media_index = media_maps(includes)
+            media_index = enrich_media_map_with_variants(media_index, token)
             for user in includes.get("users", []):
                 users_cache[str(user.get("id"))] = user
             for tweet in payload.get("data", []):
