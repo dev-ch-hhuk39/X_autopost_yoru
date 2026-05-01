@@ -38,8 +38,6 @@ jobs:
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
-          DRIVE_IMAGE_FOLDER_ID: ${{ secrets.DRIVE_IMAGE_FOLDER_ID }}
-          DRIVE_VIDEO_FOLDER_ID: ${{ secrets.DRIVE_VIDEO_FOLDER_ID }}
           CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
           CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
           CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
