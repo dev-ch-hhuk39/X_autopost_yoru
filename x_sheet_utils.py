@@ -91,6 +91,15 @@ def ensure_headers(ws, headers: Sequence[str]) -> List[str]:
     return current
 
 
+def ensure_exact_headers(ws, headers: Sequence[str]) -> List[str]:
+    values = ws.get_all_values()
+    current = values[0] if values else []
+    expected = list(headers)
+    if current != expected:
+        retrying_update(ws, range_name="1:1", values=[expected], raw=True)
+    return expected
+
+
 def records_with_row_numbers(ws, headers: Sequence[str]) -> List[Tuple[int, Dict[str, str]]]:
     values = ws.get_all_values()
     if len(values) <= 1:
@@ -216,3 +225,34 @@ def write_key_value_rows(ws, rows: Iterable[Dict[str, str]]):
         headers,
         ([row.get("key", ""), row.get("value", ""), row.get("updated_at", "")] for row in rows),
     )
+
+
+def apply_dropdown_validation(ws, headers: Sequence[str], dropdowns: Dict[str, Sequence[str]]):
+    header_index = {header: idx for idx, header in enumerate(headers)}
+    requests = []
+    for header, values in dropdowns.items():
+        if header not in header_index:
+            continue
+        col = header_index[header]
+        requests.append(
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 1,
+                        "startColumnIndex": col,
+                        "endColumnIndex": col + 1,
+                    },
+                    "rule": {
+                        "condition": {
+                            "type": "ONE_OF_LIST",
+                            "values": [{"userEnteredValue": str(value)} for value in values],
+                        },
+                        "showCustomUi": True,
+                        "strict": True,
+                    },
+                }
+            }
+        )
+    if requests:
+        ws.spreadsheet.batch_update({"requests": requests})

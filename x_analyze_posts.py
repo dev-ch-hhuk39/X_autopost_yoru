@@ -1,47 +1,28 @@
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
 
-from x_sheet_utils import get_or_create_worksheet, open_spreadsheet, replace_sheet
+from x_sheet_schema import (
+    COLLECTION_HEADERS,
+    DASHBOARD_HEADERS,
+    REVIEW_DEFAULTS,
+    REVIEW_DROPDOWNS,
+    REVIEW_HEADERS,
+)
+from x_sheet_utils import (
+    apply_dropdown_validation,
+    ensure_exact_headers,
+    get_or_create_worksheet,
+    open_spreadsheet,
+    replace_sheet,
+)
 
 JST = timezone(timedelta(hours=9))
 CONFIG_PATH = Path(__file__).with_name("x_pipeline_config.json")
-
-SCORED_HEADERS = [
-    "投稿ID",
-    "投稿URL",
-    "アカウント",
-    "キーワード",
-    "投稿日",
-    "曜日",
-    "時間帯",
-    "投稿タイプ",
-    "冒頭文",
-    "文字数",
-    "メディア有無",
-    "画像有無",
-    "動画有無",
-    "切り口",
-    "書き出し型",
-    "いいね数",
-    "リポスト数",
-    "返信数",
-    "保存数",
-    "インプレッション数",
-    "総合スコア",
-    "アカウント内順位率",
-    "キーワード内順位率",
-    "バズ判定",
-    "アカウント上位20%",
-    "キーワード上位20%",
-    "伸びた理由",
-    "再現ポイント",
-]
-
-INSIGHT_HEADERS = ["分類", "指標", "値", "示唆", "更新日時"]
 
 
 def load_config():
@@ -130,9 +111,53 @@ def replay_tip(row: pd.Series) -> str:
     parts.append(f"{row['content_angle']}の切り口")
     if row["has_image"]:
         parts.append("画像付き")
+    if row["has_video"]:
+        parts.append("動画付き")
     parts.append(f"{text_length_bucket(int(row['text_length']))}")
     parts.append(f"{row['time_slot']}に投稿")
     return " / ".join(parts)
+
+
+def normalize_whitespace(text: str) -> str:
+    return re.sub(r"[ \t]+", " ", (text or "").replace("\r\n", "\n").replace("\r", "\n")).strip()
+
+
+def split_sentences(text: str) -> List[str]:
+    normalized = normalize_whitespace(text)
+    if not normalized:
+        return []
+    parts = re.split(r"(?<=[。！？!?])\s*|\n+", normalized)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def rewrite_light(text: str) -> str:
+    sentences = split_sentences(text)
+    if not sentences:
+        return ""
+    if len(sentences) == 1:
+        one = sentences[0]
+        if len(one) > 70 and "、" in one:
+            chunks = [chunk.strip() for chunk in one.split("、") if chunk.strip()]
+            if len(chunks) >= 2:
+                return "、".join(chunks[:2]) + "。\n\n" + "、".join(chunks[2:]).strip("、")
+        return one
+    return "\n\n".join(sentences[:3])
+
+
+def rewrite_reframe(text: str, hook_style: str, content_angle: str) -> str:
+    base = rewrite_light(text)
+    if not base:
+        return ""
+    lines = [line.strip() for line in base.split("\n") if line.strip()]
+    first = lines[0]
+    if hook_style == "暴露型" and not any(word in first for word in ["実は", "ぶっちゃけ", "正直"]):
+        first = "正直、" + first
+    if content_angle == "体験談" and not any(word in first for word in ["実際", "経験", "体験"]):
+        first = first + "。"
+    rebuilt = [first]
+    if len(lines) > 1:
+        rebuilt.extend(lines[1:])
+    return "\n\n".join(rebuilt)
 
 
 def build_dataframe(raw_rows: List[Dict[str, Any]]) -> pd.DataFrame:
@@ -149,6 +174,10 @@ def build_dataframe(raw_rows: List[Dict[str, Any]]) -> pd.DataFrame:
         "impression_count",
         "image_count",
         "follower_count",
+        "quote_count",
+        "emoji_count",
+        "hashtag_count",
+        "mention_count",
     ]
     for col in numeric_cols:
         df[col] = df[col].apply(to_int)
@@ -246,89 +275,107 @@ def build_insights(df: pd.DataFrame, config: Dict[str, Any]) -> List[List[str]]:
             updated_at,
         ]
     )
-
-    rows.append(
-        [
-            "勝ち筋",
-            "強い切り口",
-            top_metric_note(df, "content_angle"),
-            "次に量産する投稿テーマの第一候補です。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "勝ち筋",
-            "強い書き出し",
-            top_metric_note(df, "hook_style"),
-            "冒頭の入り方として最も強い型です。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "勝ち筋",
-            "画像有無の比較",
-            average_metric_note(df, "画像ラベル", "performance_score"),
-            "画像あり・なしで平均スコアを比べた結果です。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "勝ち筋",
-            "強い文字数帯",
-            top_metric_note(df, "文字数帯"),
-            "投稿の長さとして強いレンジです。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "勝ち筋",
-            "強い時間帯",
-            top_metric_note(df, "time_slot"),
-            "次の投稿テストで優先して試す時間帯です。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "勝ち筋",
-            "強い曜日",
-            top_metric_note(df, "weekday"),
-            "今のデータで最も反応が良い曜日です。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "示唆",
-            "次に量産すべきテーマ",
-            top_metric_note(df, "content_angle"),
-            "まずはこの切り口をベースに、画像あり・強い書き出しで量産するのがおすすめです。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "示唆",
-            "おすすめ投稿フォーマット",
-            f"{top_metric_note(df, 'hook_style')} / {top_metric_note(df, '文字数帯')}",
-            "書き出し型と文字数帯をセットで再現すると勝ち筋を試しやすいです。",
-            updated_at,
-        ]
-    )
-    rows.append(
-        [
-            "示唆",
-            "避けたい弱いパターン",
-            df.groupby("content_angle")["performance_score"].mean().sort_values().index[0],
-            "平均スコアが最も低い切り口です。頻度を下げる候補として見てください。",
-            updated_at,
-        ]
-    )
+    rows.append(["勝ち筋", "強い切り口", top_metric_note(df, "content_angle"), "次に量産する投稿テーマの第一候補です。", updated_at])
+    rows.append(["勝ち筋", "強い書き出し", top_metric_note(df, "hook_style"), "冒頭の入り方として最も強い型です。", updated_at])
+    rows.append(["勝ち筋", "画像有無の比較", average_metric_note(df, "画像ラベル", "performance_score"), "画像あり・なしで平均スコアを比べた結果です。", updated_at])
+    rows.append(["勝ち筋", "強い文字数帯", top_metric_note(df, "文字数帯"), "投稿の長さとして強いレンジです。", updated_at])
+    rows.append(["勝ち筋", "強い時間帯", top_metric_note(df, "time_slot"), "次の投稿テストで優先して試す時間帯です。", updated_at])
+    rows.append(["勝ち筋", "強い曜日", top_metric_note(df, "weekday"), "今のデータで最も反応が良い曜日です。", updated_at])
+    rows.append(["示唆", "次に量産すべきテーマ", top_metric_note(df, "content_angle"), "まずはこの切り口をベースに、画像あり・強い書き出しで量産するのがおすすめです。", updated_at])
+    rows.append(["示唆", "おすすめ投稿フォーマット", f"{top_metric_note(df, 'hook_style')} / {top_metric_note(df, '文字数帯')}", "書き出し型と文字数帯をセットで再現すると勝ち筋を試しやすいです。", updated_at])
+    weak_pattern = df.groupby("content_angle")["performance_score"].mean().sort_values()
+    rows.append(["示唆", "避けたい弱いパターン", weak_pattern.index[0] if not weak_pattern.empty else "", "平均スコアが最も低い切り口です。頻度を下げる候補として見てください。", updated_at])
     return rows + top_posts_rows(df, updated_at)
+
+
+def build_collection_rows(df: pd.DataFrame) -> List[List[str]]:
+    if df.empty:
+        return []
+    display = pd.DataFrame(
+        {
+            "投稿ID": df["post_id"],
+            "投稿URL": df["post_url"],
+            "アカウント名": df["account_name"],
+            "アカウントID": df["account_id"],
+            "アカウントURL": df["account_url"],
+            "フォロワー数": df["follower_count"],
+            "投稿日時": df["posted_at"],
+            "曜日": df["weekday"],
+            "時間帯": df["time_slot"],
+            "投稿種別": df["post_type"],
+            "投稿本文": df["text"],
+            "投稿本文冒頭": df["hook_text"],
+            "文字数": df["text_length"],
+            "ハッシュタグ数": df["hashtag_count"],
+            "メンション数": df["mention_count"],
+            "絵文字数": df["emoji_count"],
+            "外部リンクあり": df["has_external_link"].map({True: "あり", False: "なし", "TRUE": "あり", "FALSE": "なし"}),
+            "画像あり": df["has_image"].map({True: "あり", False: "なし"}),
+            "画像枚数": df["image_count"],
+            "動画あり": df["has_video"].map({True: "あり", False: "なし"}),
+            "メディアあり": df["has_media"].map({True: "あり", False: "なし"}),
+            "画像URL一覧": df["image_urls"],
+            "動画URL一覧": df["video_urls"],
+            "いいね数": df["like_count"],
+            "リポスト数": df["repost_count"],
+            "返信数": df["reply_count"],
+            "引用数": df["quote_count"],
+            "保存数": df["bookmark_count"],
+            "インプレッション数": df["impression_count"],
+            "監視アカウント一致": df["matched_accounts"],
+            "監視キーワード一致": df["matched_keywords"],
+            "一致元": df["matched_sources"],
+            "バズ判定": df["is_buzz_post"].map({True: "該当", False: "非該当"}),
+            "アカウント内上位20%": df["is_relative_top_account"].map({True: "該当", False: "非該当"}),
+            "キーワード群内上位20%": df["is_relative_top_keyword"].map({True: "該当", False: "非該当"}),
+            "切り口": df["content_angle"],
+            "書き出し型": df["hook_style"],
+            "伸びた理由": df["why_it_grew"],
+            "再現ポイント": df["replay_tip"],
+        }
+    )
+    return display.fillna("").values.tolist()
+
+
+def build_review_rows(df: pd.DataFrame, existing_rows: List[Dict[str, Any]]) -> List[List[str]]:
+    existing_index = {str(row.get("投稿ID", "")).strip(): row for row in existing_rows if str(row.get("投稿ID", "")).strip()}
+    rows: List[List[str]] = []
+    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+
+    for row in df.sort_values("performance_score", ascending=False).itertuples(index=False):
+        existing = existing_index.get(str(row.post_id), {})
+        media_type = "動画" if row.has_video else "画像" if row.has_image else "なし"
+        draft_a = rewrite_light(row.text)
+        draft_b = rewrite_reframe(row.text, row.hook_style, row.content_angle)
+        merged = {
+            "投稿ID": row.post_id,
+            "元投稿URL": row.post_url,
+            "アカウント名": row.account_name or (f"@{row.account_handle}" if row.account_handle else ""),
+            "投稿本文": row.text,
+            "投稿本文冒頭": row.hook_text,
+            "メディア種別": media_type,
+            "画像URL一覧": row.image_urls,
+            "動画URL一覧": row.video_urls,
+            "保存メディアURL": existing.get("保存メディアURL", ""),
+            "保存メディアパス": existing.get("保存メディアパス", ""),
+            "いいね数": str(row.like_count),
+            "インプレッション数": str(row.impression_count),
+            "伸びた理由": row.why_it_grew,
+            "リライト方針A": existing.get("リライト方針A", REVIEW_DEFAULTS["リライト方針A"]),
+            "リライト案A": existing.get("リライト案A", draft_a),
+            "リライト方針B": existing.get("リライト方針B", REVIEW_DEFAULTS["リライト方針B"]),
+            "リライト案B": existing.get("リライト案B", draft_b),
+            "採用案": existing.get("採用案", REVIEW_DEFAULTS["採用案"]),
+            "転載可否": existing.get("転載可否", REVIEW_DEFAULTS["転載可否"]),
+            "投稿可否": existing.get("投稿可否", REVIEW_DEFAULTS["投稿可否"]),
+            "X投稿するか": existing.get("X投稿するか", REVIEW_DEFAULTS["X投稿するか"]),
+            "Threads投稿するか": existing.get("Threads投稿するか", REVIEW_DEFAULTS["Threads投稿するか"]),
+            "確認メモ": existing.get("確認メモ", ""),
+            "投稿先タブ": existing.get("投稿先タブ", REVIEW_DEFAULTS["投稿先タブ"]),
+            "最終同期日時": now_str,
+        }
+        rows.append([merged.get(header, "") for header in REVIEW_HEADERS])
+    return rows
 
 
 def run():
@@ -336,8 +383,14 @@ def run():
     spreadsheet = open_spreadsheet()
     tabs = config["sheet_tabs"]
     raw_ws = get_or_create_worksheet(spreadsheet, tabs["raw_posts"])
-    scored_ws = get_or_create_worksheet(spreadsheet, tabs["scored_posts"], rows=5000, cols=len(SCORED_HEADERS) + 5)
-    insights_ws = get_or_create_worksheet(spreadsheet, tabs["insights"], rows=1000, cols=len(INSIGHT_HEADERS) + 2)
+    dashboard_ws = get_or_create_worksheet(spreadsheet, tabs["dashboard"], rows=1000, cols=len(DASHBOARD_HEADERS) + 2)
+    collection_ws = get_or_create_worksheet(spreadsheet, tabs["collection_view"], rows=5000, cols=len(COLLECTION_HEADERS) + 5)
+    review_ws = get_or_create_worksheet(spreadsheet, tabs["review"], rows=5000, cols=len(REVIEW_HEADERS) + 5)
+
+    ensure_exact_headers(dashboard_ws, DASHBOARD_HEADERS)
+    ensure_exact_headers(collection_ws, COLLECTION_HEADERS)
+    ensure_exact_headers(review_ws, REVIEW_HEADERS)
+    apply_dropdown_validation(review_ws, REVIEW_HEADERS, REVIEW_DROPDOWNS)
 
     raw_rows = raw_ws.get_all_records(default_blank="")
     df = build_dataframe(raw_rows)
@@ -354,45 +407,20 @@ def run():
             lambda row: why_it_grew(row, thresholds["buzz_like_count"], thresholds["buzz_impression_count"]),
             axis=1,
         )
-        scored_df = pd.DataFrame(
-            {
-                "投稿ID": df["post_id"],
-                "投稿URL": df["post_url"],
-                "アカウント": df["account_handle"].apply(lambda v: f"@{v}" if str(v) else ""),
-                "キーワード": df["matched_keywords"],
-                "投稿日": df["posted_at"],
-                "曜日": df["weekday"],
-                "時間帯": df["time_slot"],
-                "投稿タイプ": df["post_type"],
-                "冒頭文": df["hook_text"],
-                "文字数": df["text_length"],
-                "メディア有無": df["has_media"].map({True: "あり", False: "なし"}),
-                "画像有無": df["has_image"].map({True: "あり", False: "なし"}),
-                "動画有無": df["has_video"].map({True: "あり", False: "なし"}),
-                "切り口": df["content_angle"],
-                "書き出し型": df["hook_style"],
-                "いいね数": df["like_count"],
-                "リポスト数": df["repost_count"],
-                "返信数": df["reply_count"],
-                "保存数": df["bookmark_count"],
-                "インプレッション数": df["impression_count"],
-                "総合スコア": df["performance_score"].round(2),
-                "アカウント内順位率": (df["account_percentile"] * 100).round(1).astype(str) + "%",
-                "キーワード内順位率": (df["keyword_percentile"] * 100).round(1).astype(str) + "%",
-                "バズ判定": df["is_buzz_post"].map({True: "該当", False: "非該当"}),
-                "アカウント上位20%": df["is_relative_top_account"].map({True: "該当", False: "非該当"}),
-                "キーワード上位20%": df["is_relative_top_keyword"].map({True: "該当", False: "非該当"}),
-                "伸びた理由": df["why_it_grew"],
-                "再現ポイント": df.apply(replay_tip, axis=1),
-            }
-        )
-        replace_sheet(scored_ws, SCORED_HEADERS, scored_df.fillna("").values.tolist())
+        df["replay_tip"] = df.apply(replay_tip, axis=1)
+        replace_sheet(collection_ws, COLLECTION_HEADERS, build_collection_rows(df))
+
+        existing_review_rows = review_ws.get_all_records(default_blank="")
+        replace_sheet(review_ws, REVIEW_HEADERS, build_review_rows(df, existing_review_rows))
+        apply_dropdown_validation(review_ws, REVIEW_HEADERS, REVIEW_DROPDOWNS)
     else:
-        replace_sheet(scored_ws, SCORED_HEADERS, [])
+        replace_sheet(collection_ws, COLLECTION_HEADERS, [])
+        replace_sheet(review_ws, REVIEW_HEADERS, [])
+        apply_dropdown_validation(review_ws, REVIEW_HEADERS, REVIEW_DROPDOWNS)
 
     insights_rows = build_insights(df, config)
-    replace_sheet(insights_ws, INSIGHT_HEADERS, insights_rows)
-    print(f"[OK] Analyzed {len(df)} raw posts.")
+    replace_sheet(dashboard_ws, DASHBOARD_HEADERS, insights_rows)
+    print(f"[OK] Analyzed {len(df)} raw posts and synced review rows.")
 
 
 if __name__ == "__main__":

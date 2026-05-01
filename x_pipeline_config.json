@@ -3,11 +3,12 @@
   "platform": "x",
   "genre": "夜職",
   "sheet_tabs": {
-    "post_queue": "x_autopost_yoru",
-    "raw_posts": "yorusyoku_raw_posts",
-    "scored_posts": "yorusyoku_scored_posts",
-    "insights": "yorusyoku_insights",
-    "state": "yorusyoku_state"
+    "dashboard": "00_ダッシュボード",
+    "collection_view": "01_収集投稿",
+    "review": "02_承認レビュー",
+    "post_queue": "03_投稿キュー",
+    "raw_posts": "98_収集内部",
+    "state": "99_システム"
   },
   "monitor_accounts": [
     {

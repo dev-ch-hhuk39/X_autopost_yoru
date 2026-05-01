@@ -8,58 +8,27 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
-from x_sheet_utils import ensure_headers, get_or_create_worksheet, open_spreadsheet, upsert_rows, write_key_value_rows
+from x_sheet_schema import (
+    COLLECTION_HEADERS,
+    DASHBOARD_HEADERS,
+    QUEUE_DROPDOWNS,
+    QUEUE_HEADERS,
+    RAW_HEADERS,
+    REVIEW_DROPDOWNS,
+    REVIEW_HEADERS,
+    SYSTEM_HEADERS,
+)
+from x_sheet_utils import (
+    apply_dropdown_validation,
+    ensure_exact_headers,
+    get_or_create_worksheet,
+    open_spreadsheet,
+    upsert_rows,
+    write_key_value_rows,
+)
 
 JST = timezone(timedelta(hours=9))
 CONFIG_PATH = Path(__file__).with_name("x_pipeline_config.json")
-
-RAW_HEADERS = [
-    "post_id",
-    "post_url",
-    "platform",
-    "genre",
-    "account_name",
-    "account_id",
-    "account_handle",
-    "account_url",
-    "follower_count",
-    "posted_at",
-    "posted_date",
-    "weekday",
-    "hour",
-    "time_slot",
-    "post_type",
-    "text",
-    "hook_text",
-    "text_length",
-    "emoji_count",
-    "hashtag_count",
-    "mention_count",
-    "hashtags",
-    "mentions",
-    "link_urls",
-    "has_external_link",
-    "image_count",
-    "has_image",
-    "has_video",
-    "has_media",
-    "quote_count",
-    "reply_count",
-    "repost_count",
-    "like_count",
-    "bookmark_count",
-    "impression_count",
-    "matched_keywords",
-    "matched_accounts",
-    "matched_sources",
-    "source_types",
-    "is_from_account_monitor",
-    "is_from_keyword_search",
-    "first_collected_at",
-    "last_metrics_update_at",
-    "last_source_sync_at",
-    "raw_payload_json",
-]
 
 
 def load_config():
@@ -441,6 +410,16 @@ def build_post_record(
         "link_urls": urls,
         "image_count": image_count,
         "has_video": has_video,
+        "image_urls": [
+            item.get("url") or item.get("preview_image_url")
+            for item in media_items
+            if item.get("type") == "photo" and (item.get("url") or item.get("preview_image_url"))
+        ],
+        "video_urls": [
+            item.get("preview_image_url") or item.get("url")
+            for item in media_items
+            if item.get("type") in {"video", "animated_gif"} and (item.get("preview_image_url") or item.get("url"))
+        ],
         "reply_count": extract_metric(public_metrics, "reply_count"),
         "repost_count": extract_metric(public_metrics, "retweet_count") or extract_metric(public_metrics, "repost_count"),
         "like_count": extract_metric(public_metrics, "like_count"),
@@ -720,6 +699,8 @@ def normalize_post(post: Dict[str, Any], existing: Dict[str, str], config: Dict[
         "has_image": to_bool_string(image_count > 0),
         "has_video": to_bool_string(bool(post.get("has_video") or post.get("video_url") or post.get("video_urls"))),
         "has_media": to_bool_string(image_count > 0 or bool(post.get("has_video") or post.get("video_url") or post.get("video_urls"))),
+        "image_urls": join_pipe(normalize_list(post.get("image_urls"))),
+        "video_urls": join_pipe(normalize_list(post.get("video_urls"))),
         "quote_count": str(to_int(post.get("quote_count"))),
         "reply_count": str(to_int(post.get("reply_count") or post.get("comment_count"))),
         "repost_count": str(to_int(post.get("repost_count") or post.get("retweet_count"))),
@@ -743,15 +724,21 @@ def bootstrap_sheet(config: Dict[str, Any]):
     spreadsheet = open_spreadsheet()
     tabs = config["sheet_tabs"]
     raw_ws = get_or_create_worksheet(spreadsheet, tabs["raw_posts"], rows=5000, cols=len(RAW_HEADERS) + 5)
-    scored_ws = get_or_create_worksheet(spreadsheet, tabs["scored_posts"], rows=5000, cols=30)
-    insights_ws = get_or_create_worksheet(spreadsheet, tabs["insights"], rows=1000, cols=10)
-    state_ws = get_or_create_worksheet(spreadsheet, tabs["state"], rows=100, cols=3)
+    dashboard_ws = get_or_create_worksheet(spreadsheet, tabs["dashboard"], rows=1000, cols=len(DASHBOARD_HEADERS) + 2)
+    collection_ws = get_or_create_worksheet(spreadsheet, tabs["collection_view"], rows=5000, cols=len(COLLECTION_HEADERS) + 5)
+    review_ws = get_or_create_worksheet(spreadsheet, tabs["review"], rows=5000, cols=len(REVIEW_HEADERS) + 5)
+    queue_ws = get_or_create_worksheet(spreadsheet, tabs["post_queue"], rows=5000, cols=len(QUEUE_HEADERS) + 5)
+    state_ws = get_or_create_worksheet(spreadsheet, tabs["state"], rows=100, cols=len(SYSTEM_HEADERS))
 
-    ensure_headers(raw_ws, RAW_HEADERS)
-    ensure_headers(scored_ws, ["投稿ID"])
-    ensure_headers(insights_ws, ["分類", "指標", "値", "示唆", "更新日時"])
-    ensure_headers(state_ws, ["key", "value", "updated_at"])
-    return spreadsheet, raw_ws, scored_ws, insights_ws, state_ws
+    ensure_exact_headers(raw_ws, RAW_HEADERS)
+    ensure_exact_headers(dashboard_ws, DASHBOARD_HEADERS)
+    ensure_exact_headers(collection_ws, COLLECTION_HEADERS)
+    ensure_exact_headers(review_ws, REVIEW_HEADERS)
+    ensure_exact_headers(queue_ws, QUEUE_HEADERS)
+    ensure_exact_headers(state_ws, SYSTEM_HEADERS)
+    apply_dropdown_validation(review_ws, REVIEW_HEADERS, REVIEW_DROPDOWNS)
+    apply_dropdown_validation(queue_ws, QUEUE_HEADERS, QUEUE_DROPDOWNS)
+    return spreadsheet, raw_ws, dashboard_ws, collection_ws, review_ws, queue_ws, state_ws
 
 
 def current_state_rows(config: Dict[str, Any], imported_count: int, status: str) -> List[Dict[str, str]]:
@@ -771,7 +758,7 @@ def current_state_rows(config: Dict[str, Any], imported_count: int, status: str)
 def run():
     args = parse_args()
     config = load_config()
-    spreadsheet, raw_ws, _, _, state_ws = bootstrap_sheet(config)
+    spreadsheet, raw_ws, _, _, _, _, state_ws = bootstrap_sheet(config)
     state = parse_state(state_ws)
 
     if args.check_only:

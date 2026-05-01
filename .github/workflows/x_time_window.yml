@@ -1,9 +1,9 @@
-name: X Auto Post (queue from Sheet at 00:00 & 02:00 JST)
+name: X Auto Post (queue from Sheet at 14:00 & 18:00 JST)
 
 on:
   schedule:
-    - cron: "0 15 * * *"  # JST 00:00（UTC 15:00）
-    - cron: "0 17 * * *"  # JST 02:00（UTC 17:00）
+    - cron: "45 4 * * *"   # JST 13:45
+    - cron: "45 8 * * *"   # JST 17:45
   workflow_dispatch:
     inputs:
       force_run:
@@ -11,50 +11,57 @@ on:
         required: false
         default: "yes"
 
+concurrency:
+  group: x-auto-post-yorusyoku
+  cancel-in-progress: false
+
 jobs:
   post:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 45
     env:
       TZ: Asia/Tokyo
-
-      # --- Google Sheets ---
       SHEET_ID: ${{ secrets.SHEET_ID }}
       GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
-      SHEET_TAB: x_autopost_yoru
-
-      # --- X API keys ---
+      SHEET_TAB: 03_投稿キュー
       X_API_KEY: ${{ secrets.X_API_KEY }}
       X_API_SECRET: ${{ secrets.X_API_SECRET }}
       X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
       X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
 
-      # --- キュー方式: 1件だけ投稿 ---
-      FORCE_ONE: "1"
-      DRY_RUN: "0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Mask secrets
+
+      - name: Sync queue before posting
         run: |
-          echo "::add-mask::${{ secrets.GCP_SA_JSON }}"
-          echo "::add-mask::${{ secrets.X_API_KEY }}"
-          echo "::add-mask::${{ secrets.X_API_SECRET }}"
-          echo "::add-mask::${{ secrets.X_ACCESS_TOKEN }}"
-          echo "::add-mask::${{ secrets.X_ACCESS_TOKEN_SECRET }}"
-          echo "::add-mask::${{ secrets.DISCORD_WEBHOOK_URL }}"
-      - name: Run poster (queue 1 item)
+          python x_sync_post_queue.py
+
+      - name: Wait random 0-30 minutes for natural timing
+        if: github.event_name == 'schedule'
+        run: |
+          python - <<'PY'
+          import random
+          import time
+          seconds = random.randint(0, 30 * 60)
+          print(f"[INFO] Sleeping for {seconds} seconds before posting.")
+          time.sleep(seconds)
+          PY
+
+      - name: Post 1 item from queue
         run: |
           python auto_post.py
-      - name: Discord通知（失敗時）
+
+      - name: Discord notify on failure
         if: failure()
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -62,14 +69,5 @@ jobs:
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
             curl -s -X POST "$DISCORD_WEBHOOK_URL" \
               -H "Content-Type: application/json" \
-              -d "{\"embeds\":[{\"title\":\"\\u274c 投稿失敗\",\"description\":\"夜職X: 投稿エラーが発生しました\",\"color\":16711680}]}"
+              -d "{\"embeds\":[{\"title\":\"X投稿失敗\",\"description\":\"夜職Xの自動投稿でエラーが発生しました。\",\"color\":16711680}]}"
           fi
-      - name: Keepalive Workflow
-        if: always()
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          date > last_run.txt
-          git add last_run.txt
-          git commit -m "keepalive: $(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
-          git push

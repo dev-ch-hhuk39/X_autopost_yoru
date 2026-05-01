@@ -47,6 +47,13 @@ jobs:
         run: |
           python x_analyze_posts.py
 
+      - name: Sync approved review rows into post queue
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+        run: |
+          python x_sync_post_queue.py
+
       - name: Discord notify on failure
         if: failure()
         env:
