@@ -6,6 +6,7 @@ import time
 
 import gspread
 import requests
+from google.oauth2.service_account import Credentials
 from requests_oauthlib import OAuth1
 
 TZ = dt.timezone(dt.timedelta(hours=9), name="JST")
