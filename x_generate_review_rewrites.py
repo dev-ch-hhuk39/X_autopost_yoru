@@ -13,8 +13,8 @@ from x_sheet_utils import apply_dropdown_validation, ensure_exact_headers, get_o
 
 JST = timezone(timedelta(hours=9))
 DEFAULT_MODEL = os.environ.get("GEMINI_REWRITE_MODEL", "gemini-2.5-flash").strip()
-MAX_ROWS_PER_RUN = int(os.environ.get("GEMINI_REWRITE_MAX_ROWS", "8"))
-SECONDS_BETWEEN_CALLS = float(os.environ.get("GEMINI_REWRITE_INTERVAL_SECONDS", "7"))
+MAX_ROWS_PER_RUN = int(os.environ.get("GEMINI_REWRITE_MAX_ROWS", "5"))
+SECONDS_BETWEEN_CALLS = float(os.environ.get("GEMINI_REWRITE_INTERVAL_SECONDS", "10"))
 
 
 def now_str() -> str:
@@ -33,9 +33,49 @@ def remove_fences(text: str) -> str:
     return stripped.strip()
 
 
-def parse_json_response(text: str) -> Dict[str, str]:
+def extract_between(text: str, start_marker: str, end_marker: Optional[str] = None) -> str:
+    start = text.find(start_marker)
+    if start == -1:
+        return ""
+    start += len(start_marker)
+    if end_marker:
+        end = text.find(end_marker, start)
+        if end == -1:
+            end = len(text)
+    else:
+        end = len(text)
+    return text[start:end].strip()
+
+
+def clean_candidate_value(text: str) -> str:
+    value = str(text or "").strip().strip(",").strip()
+    if value.startswith('"'):
+        value = value[1:]
+    if value.endswith('"'):
+        value = value[:-1]
+    value = value.replace('\\"', '"')
+    value = value.replace("\\n", "\n")
+    value = value.replace("\\t", "\t")
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def tolerant_parse_json_response(text: str) -> Dict[str, str]:
     cleaned = remove_fences(text)
-    return json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        rewrite_a = extract_between(cleaned, '"rewrite_a"', '"rewrite_b"')
+        rewrite_b = extract_between(cleaned, '"rewrite_b"')
+        rewrite_a = clean_candidate_value(rewrite_a.split(":", 1)[1] if ":" in rewrite_a else rewrite_a)
+        rewrite_b = clean_candidate_value(rewrite_b.split(":", 1)[1] if ":" in rewrite_b else rewrite_b)
+        if rewrite_a and rewrite_b:
+            return {"rewrite_a": rewrite_a, "rewrite_b": rewrite_b}
+        raise
+
+
+def parse_json_response(text: str) -> Dict[str, str]:
+    return tolerant_parse_json_response(text)
 
 
 def eligible_rows(ws) -> List[Tuple[int, Dict[str, str]]]:
@@ -63,6 +103,8 @@ def build_prompt(row: Dict[str, str]) -> str:
 要件:
 - 出力はJSONのみ
 - キーは rewrite_a, rewrite_b の2つ
+- JSON文字列中の改行は \\n でエスケープする
+- 1行のJSONで返す
 - rewrite_a は「軽整形」: 元文の意味・固有名詞・熱量をできるだけ残し、読みやすく整える
 - rewrite_b は「再構成」: 元文の主張を活かしつつ、冒頭フックを少し強めて再構成する
 - どちらも source の t.co URL は除去する
@@ -90,6 +132,14 @@ def call_gemini(api_key: str, prompt_text: str, model_name: str = DEFAULT_MODEL)
             "temperature": 0.8,
             "maxOutputTokens": 800,
             "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "rewrite_a": {"type": "STRING"},
+                    "rewrite_b": {"type": "STRING"},
+                },
+                "required": ["rewrite_a", "rewrite_b"],
+            },
         },
     }
     response = requests.post(
