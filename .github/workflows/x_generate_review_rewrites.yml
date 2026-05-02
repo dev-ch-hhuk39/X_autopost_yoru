@@ -33,8 +33,8 @@ jobs:
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_REWRITE_MODEL: gemini-2.5-flash
-          GEMINI_REWRITE_MAX_ROWS: "5"
-          GEMINI_REWRITE_INTERVAL_SECONDS: "10"
+          GEMINI_REWRITE_MAX_ROWS: "3"
+          GEMINI_REWRITE_INTERVAL_SECONDS: "12"
         run: |
           python x_generate_review_rewrites.py
 

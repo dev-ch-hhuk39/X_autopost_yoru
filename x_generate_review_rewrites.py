@@ -13,8 +13,8 @@ from x_sheet_utils import apply_dropdown_validation, ensure_exact_headers, get_o
 
 JST = timezone(timedelta(hours=9))
 DEFAULT_MODEL = os.environ.get("GEMINI_REWRITE_MODEL", "gemini-2.5-flash").strip()
-MAX_ROWS_PER_RUN = int(os.environ.get("GEMINI_REWRITE_MAX_ROWS", "5"))
-SECONDS_BETWEEN_CALLS = float(os.environ.get("GEMINI_REWRITE_INTERVAL_SECONDS", "10"))
+MAX_ROWS_PER_RUN = int(os.environ.get("GEMINI_REWRITE_MAX_ROWS", "3"))
+SECONDS_BETWEEN_CALLS = float(os.environ.get("GEMINI_REWRITE_INTERVAL_SECONDS", "12"))
 
 
 def now_str() -> str:
@@ -33,16 +33,13 @@ def remove_fences(text: str) -> str:
     return stripped.strip()
 
 
-def parse_tagged_response(text: str) -> Dict[str, str]:
+def parse_plain_response(text: str) -> str:
     cleaned = remove_fences(text)
-    match = re.search(r"\[A\](.*)\[B\](.*)", cleaned, re.DOTALL)
-    if not match:
-        raise RuntimeError(f"Tagged rewrite response not found: {cleaned[:500]}")
-    rewrite_a = clean_text(match.group(1))
-    rewrite_b = clean_text(match.group(2))
-    if not rewrite_a or not rewrite_b:
-        raise RuntimeError(f"Tagged rewrite response was empty: {cleaned[:500]}")
-    return {"rewrite_a": rewrite_a, "rewrite_b": rewrite_b}
+    cleaned = re.sub(r"^\[[AB]\]\s*", "", cleaned).strip()
+    cleaned = re.sub(r"^案[AB][:：]\s*", "", cleaned).strip()
+    if not cleaned:
+        raise RuntimeError("Gemini rewrite response was empty.")
+    return clean_text(cleaned)
 
 
 def eligible_rows(ws) -> List[Tuple[int, Dict[str, str]]]:
@@ -63,23 +60,23 @@ def eligible_rows(ws) -> List[Tuple[int, Dict[str, str]]]:
     return output
 
 
-def build_prompt(row: Dict[str, str]) -> str:
+def build_prompt(row: Dict[str, str], mode: str) -> str:
+    mode_instruction = (
+        "A案: 元文の意味・固有名詞・熱量をできるだけ残し、読みやすさだけを整えてください。"
+        if mode == "A"
+        else "B案: 元文の主張を活かしつつ、冒頭フックを少し強めて再構成してください。"
+    )
     return f"""
-あなたは日本語SNS運用の編集者です。以下の元投稿を、転載用の下書きとして2案にリライトしてください。
+あなたは日本語SNS運用の編集者です。以下の元投稿を、転載用の下書きとしてリライトしてください。
 
 要件:
 - 出力はプレーンテキストのみ
-- 必ず次の形式で返す
-  [A]
-  ここに案A
-  [B]
-  ここに案B
-- [A] と [B] のタグは必ず含める
-- rewrite_a は「軽整形」: 元文の意味・固有名詞・熱量をできるだけ残し、読みやすく整える
-- rewrite_b は「再構成」: 元文の主張を活かしつつ、冒頭フックを少し強めて再構成する
+- 見出し、タグ、説明、引用符は書かない
+- リライト本文だけ返す
+- 今回は {mode}案 を作る
+- {mode_instruction}
 - どちらも source の t.co URL は除去する
 - ハッシュタグは付けない
-- 引用符や補足説明は書かない
 - 文字数は日本語で自然な範囲に収める
 - 固有名詞がフックとして重要そうなら残す
 - 誹謗中傷を強めない
@@ -94,7 +91,7 @@ def build_prompt(row: Dict[str, str]) -> str:
 """.strip()
 
 
-def call_gemini(api_key: str, prompt_text: str, model_name: str = DEFAULT_MODEL) -> Dict[str, str]:
+def call_gemini(api_key: str, prompt_text: str, model_name: str = DEFAULT_MODEL) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
@@ -115,7 +112,7 @@ def call_gemini(api_key: str, prompt_text: str, model_name: str = DEFAULT_MODEL)
     response.raise_for_status()
     data = response.json()
     text = data["candidates"][0]["content"]["parts"][0]["text"]
-    return parse_tagged_response(text)
+    return parse_plain_response(text)
 
 
 def update_row(ws, row_idx: int, updates: Dict[str, str]):
@@ -145,11 +142,11 @@ def run():
 
     for row_idx, row in targets:
         try:
-            result = call_gemini(api_key, build_prompt(row))
-            rewrite_a = clean_text(result.get("rewrite_a", ""))
-            rewrite_b = clean_text(result.get("rewrite_b", ""))
+            rewrite_a = call_gemini(api_key, build_prompt(row, "A"))
+            time.sleep(SECONDS_BETWEEN_CALLS)
+            rewrite_b = call_gemini(api_key, build_prompt(row, "B"))
             if not rewrite_a or not rewrite_b:
-                raise RuntimeError(f"Gemini returned empty rewrites: {result}")
+                raise RuntimeError("Gemini returned empty rewrites.")
             update_row(
                 review_ws,
                 row_idx,
