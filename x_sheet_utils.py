@@ -230,6 +230,19 @@ def write_key_value_rows(ws, rows: Iterable[Dict[str, str]]):
 def apply_dropdown_validation(ws, headers: Sequence[str], dropdowns: Dict[str, Sequence[str]]):
     header_index = {header: idx for idx, header in enumerate(headers)}
     requests = []
+    requests.append(
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": len(headers),
+                },
+                "rule": None,
+            }
+        }
+    )
     for header, values in dropdowns.items():
         if header not in header_index:
             continue
