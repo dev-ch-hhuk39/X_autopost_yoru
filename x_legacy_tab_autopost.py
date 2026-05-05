@@ -28,6 +28,7 @@ TWEET_URL = "https://api.twitter.com/2/tweets"
 STATUS_UPDATE_URL = "https://api.twitter.com/1.1/statuses/update.json"
 MEDIA_UPLOAD_URL = "https://upload.twitter.com/1.1/media/upload.json"
 MAX_TWEET_CHARS = int(os.environ.get("LEGACY_X_MAX_CHARS", "275"))
+RETRY_V1_FALLBACK = os.environ.get("LEGACY_X_RETRY_V1_FALLBACK", "").strip().lower() in {"1", "true", "yes"}
 
 
 def log(*args):
@@ -122,7 +123,7 @@ def post_tweet(text: str, media_id=None):
         return post_tweet_v2(text, media_id)
     except RuntimeError as exc:
         message = str(exc)
-        if "Tweet failed: 403" not in message:
+        if "Tweet failed: 403" not in message or not RETRY_V1_FALLBACK:
             raise
         log("[WARN] v2 tweet create returned 403. Retrying with v1.1 statuses/update.")
         return post_tweet_v1(text, media_id)
@@ -141,7 +142,18 @@ def update_cells(ws, row_number: int, updates):
 
 def is_pending_status(status: str) -> bool:
     text = str(status or "").strip().lower()
-    return text not in {"posted", "done", "済", "posted✅"}
+    return text not in {
+        "posted",
+        "done",
+        "済",
+        "posted✅",
+        "error",
+        "failed",
+        "skip",
+        "skipped",
+        "投稿不可",
+        "エラー",
+    }
 
 
 def pick_target(records):
