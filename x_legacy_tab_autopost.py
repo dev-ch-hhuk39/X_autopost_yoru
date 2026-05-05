@@ -25,7 +25,9 @@ POST_HEADERS = [
 ]
 
 TWEET_URL = "https://api.twitter.com/2/tweets"
+STATUS_UPDATE_URL = "https://api.twitter.com/1.1/statuses/update.json"
 MEDIA_UPLOAD_URL = "https://upload.twitter.com/1.1/media/upload.json"
+MAX_TWEET_CHARS = int(os.environ.get("LEGACY_X_MAX_CHARS", "275"))
 
 
 def log(*args):
@@ -86,7 +88,16 @@ def upload_media_from_url(image_url: str):
     return upload_image_bytes(response.content)
 
 
-def post_tweet(text: str, media_id=None):
+def normalize_tweet_text(text: str) -> str:
+    text = str(text or "").strip()
+    if len(text) <= MAX_TWEET_CHARS:
+        return text
+    trimmed = text[:MAX_TWEET_CHARS].rstrip()
+    log(f"[WARN] Legacy X text was {len(text)} chars. Trimmed to {len(trimmed)} chars.")
+    return trimmed
+
+
+def post_tweet_v2(text: str, media_id=None):
     payload = {"text": text}
     if media_id:
         payload["media"] = {"media_ids": [media_id]}
@@ -94,6 +105,27 @@ def post_tweet(text: str, media_id=None):
     if response.status_code >= 400:
         raise RuntimeError(f"Tweet failed: {response.status_code} {response.text}")
     return response.json()["data"]["id"]
+
+
+def post_tweet_v1(text: str, media_id=None):
+    data = {"status": text}
+    if media_id:
+        data["media_ids"] = media_id
+    response = requests.post(STATUS_UPDATE_URL, auth=get_oauth(), data=data, timeout=60)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Tweet v1.1 fallback failed: {response.status_code} {response.text}")
+    return str(response.json()["id_str"])
+
+
+def post_tweet(text: str, media_id=None):
+    try:
+        return post_tweet_v2(text, media_id)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "Tweet failed: 403" not in message:
+            raise
+        log("[WARN] v2 tweet create returned 403. Retrying with v1.1 statuses/update.")
+        return post_tweet_v1(text, media_id)
 
 
 def update_cells(ws, row_number: int, updates):
@@ -132,9 +164,9 @@ def run():
         return
 
     now_str = dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    text = str(row.get("text", "")).strip()
+    text = normalize_tweet_text(row.get("text", ""))
     image_url = str(row.get("image_url", "")).strip()
-    log(f"[TARGET] Row {row_number}: {text[:40]}...")
+    log(f"[TARGET] Row {row_number}: chars={len(text)} text={text[:40]}...")
 
     try:
         media_id = upload_media_from_url(image_url) if image_url else None
