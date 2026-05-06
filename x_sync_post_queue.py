@@ -32,6 +32,15 @@ def first_media_url(value: str) -> str:
     return parts[0] if parts else ""
 
 
+def next_state_for_target(existing_state: str, target: str, approved: bool) -> str:
+    state = str(existing_state or "").strip()
+    if target != "投稿する" or not approved:
+        return state or "スキップ"
+    if state in {"", "スキップ", "投稿しない", "未投稿"}:
+        return "投稿待ち"
+    return state
+
+
 def build_queue_rows(review_rows: List[Dict[str, str]], existing_rows: List[Dict[str, str]]) -> List[List[str]]:
     existing_index = {
         str(row.get("元投稿ID", "")).strip(): row
@@ -70,12 +79,8 @@ def build_queue_rows(review_rows: List[Dict[str, str]], existing_rows: List[Dict
         queue_video_url = threads_video_url if media_type == "動画" else first_media_url(review.get("動画URL一覧", ""))
 
         queue_id = existing.get("キューID", "") or f"x-{source_id}"
-        x_state = existing.get("X投稿状態", "")
-        if not x_state:
-            x_state = "投稿待ち" if x_target == "投稿する" and approved else "スキップ"
-        threads_state = existing.get("Threads投稿状態", "")
-        if not threads_state:
-            threads_state = "投稿待ち" if threads_target == "投稿する" and approved else "スキップ"
+        x_state = next_state_for_target(existing.get("X投稿状態", ""), x_target, approved)
+        threads_state = next_state_for_target(existing.get("Threads投稿状態", ""), threads_target, approved)
 
         if not approved:
             x_target = existing.get("X投稿対象", x_target)
